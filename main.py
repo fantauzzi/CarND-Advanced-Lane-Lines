@@ -42,8 +42,10 @@ def calibrate_camera():
 
     img_size = (img.shape[1], img.shape[0])
     # Do camera calibration given object points and image points
-    ret = cv2.calibrateCamera(obj_points, img_points, img_size, None, None)
-    return ret
+    ret, mtx, dist, rvecs, tvecs = cv2.calibrateCamera(obj_points, img_points, img_size, None, None)
+    h, w = img.shape[:2]
+    new_mtx, roi = cv2.getOptimalNewCameraMatrix(mtx, dist, (w, h), 1, (w, h))
+    return new_mtx, dist, rvecs, tvecs, roi
 
 
 def switch_RGB(img):
@@ -54,18 +56,21 @@ def switch_RGB(img):
 
 
 def no_ticks(axes):
+    '''
+    Removes ticks and related numbers from both axis of the given matplotlib.axes.Axes
+    '''
     axes.get_xaxis().set_ticks([])
     axes.get_yaxis().set_ticks([])
 
 
-def save_undistorted_sample(f_name, mtx, dist):
+def save_undistorted_sample(f_name, mtx, dist, roi):
     '''
     Undirstorts the image from the given file based on camera parameters `mtx` and `dist` and saves
     the result in a .png file under `output_dir`, along with the original (distorted) image, for comparison
     '''
     img = cv2.imread(f_name)
     assert img is not None
-    undistorted_img = cv2.undistort(img, mtx, dist, None, mtx)
+    undistorted_img = undistort(img, mtx, dist, roi)
 
     # Switch from BGR to RGB for presentation in Matplotlib
     img = switch_RGB(img)
@@ -87,10 +92,10 @@ def save_undistorted_sample(f_name, mtx, dist):
     fig.savefig(output_dir + '/undistored-' + output_f_name)  # TODO fix all '/' such that it will work under Windows
 
 
-def save_undistorted(f_name, mtx, dist):
+def save_undistorted(f_name, mtx, dist, roi):
     img = cv2.imread(f_name)
     assert img is not None
-    undistorted_img = cv2.undistort(img, mtx, dist, None, mtx)
+    undistorted_img = undistort(img, mtx, dist, roi)
     f_basename = os.path.basename(f_name)
     output_f_name = os.path.splitext(f_basename)[0] + '.png'
     cv2.imwrite(output_dir + '/undistorted-' + output_f_name, undistorted_img)
@@ -154,41 +159,24 @@ def try_intersect():
     x = find_x_given_y(5, c, d)
     assert x == 15
 
-
-def main():
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-
-    # Calibrate the camera
-    ret, mtx, dist, rvecs, tvecs = calibrate_camera()
-
-    # Save an image with one calibration sample along with its undistorted version
-    save_undistorted_sample(calibration_dir + '/calibration2.jpg', mtx, dist)
-
-    #############################################################
-    test_image = 'test_images/straight_lines2.jpg'
-    # test_image = 'test_images/test5.jpg'
-    save_undistorted(test_image, mtx, dist)
-
-    # Load a test image (for now)
-    img = cv2.imread(test_image)
-    assert img is not None
-
-    # Un-distort it applying camera calibration
+def undistort(img, mtx, dist, roi):
     undistorted_img = cv2.undistort(img, mtx, dist, None, mtx)
+    x, y, w, h = roi
+    # cropped_img= undistorted_img[y:y + h, x:x + w]
+    cropped_img = undistorted_img
+    return cropped_img
 
-    # Convert to the gray-scale of choice
-    # gscale_img = grayscale(undistorted_img)
+def find_perspective_transform(img):
+    # Begin by finding the perspective vanishing point
+    lane_l = ((264, 688), (621, 431))  # Two points identifying the line going along the left lane marking
+    lane_r = ((660, 431), (1059, 688))  # Two points identifying the line going along right lane marking
+    v_point = find_intersect(*lane_l, *lane_r)  # Intersection of the two lines above (perspective vanishing point)
 
-    lane_l = ((264, 688), (621, 431))
-    lane_r = ((660, 431), (1059, 688))
-    v_point = find_intersect(*lane_l, *lane_r)
-    target_shape = (undistorted_img.shape[0], undistorted_img.shape[1])
-    # y1, y2 = round(.2*target_shape[0]), target_shape[0]-1
-    # y1, y2 = 431, 688
-    y1, y2 = round((target_shape[0] - v_point[1]) * .13 + v_point[1]), target_shape[0] - 51
-    assert v_point[1] <= y1 <= target_shape[0] - 1
-    assert v_point[1] <= y2 <= target_shape[0] - 1
+    # Determine a quadrangle in the source image
+    source_h = img.shape[0]
+    y1, y2 = round((source_h - v_point[1]) * .13 + v_point[1]), source_h - 51
+    assert v_point[1] <= y1 <= source_h - 1
+    assert v_point[1] <= y2 <= source_h - 1
     source = np.float32([
         [find_x_given_y(y2, *lane_l), y2],
         [find_x_given_y(y1, *lane_l), y1],
@@ -196,23 +184,48 @@ def main():
         [find_x_given_y(y2, *lane_r), y2]
     ])
 
-    # TODO compute the vanishing point of the lane lines, and use lines from there to the lower corners of the image
-    '''source = np.float32([[264, 688],
-                         [621, 431],
-                         [660, 431],
-                         [1059, 688]])'''
-    # target_size = (undistorted_img.shape[1], undistorted_img.shape[0])  # (No. of columns, No. of rows)
-    # TODO remove hard-wiring of numbers below
+    # Determine the corresponing quandrangle in the target (destination) image
+    target_shape = (img.shape[0], img.shape[1])  # (rows, columns)
     target = np.float32([[source[0, 0], target_shape[0] - 1],
                          [source[0, 0], 0],
                          [source[3, 0], 0],
                          [source[3, 0], target_shape[0] - 1]])
-    source = np.expand_dims(source, 1)
-    # Given src and dst points, calculate the perspective transform matrix
-    M = cv2.getPerspectiveTransform(src=source, dst=target)
-    # Warp the image using OpenCV warpPerspective()
-    warped = cv2.warpPerspective(undistorted_img, M, target_shape[::-1])
 
+    # Given the source and target quandrangles, calculate the perspective transform matrix
+    source = np.expand_dims(source, 1)  # OpenCV requires this extra dimension
+    M = cv2.getPerspectiveTransform(src=source, dst=target)
+    return M
+
+
+def main():
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    # Calibrate the camera
+    mtx, dist, rvecs, tvecs, roi = calibrate_camera()
+
+    # Save an image with one calibration sample along with its undistorted version
+    save_undistorted_sample(calibration_dir + '/calibration2.jpg', mtx, dist, roi)
+
+    #############################################################
+    # test_image = 'test_images/straight_lines2.jpg'
+    test_image = 'test_images/test6.jpg'
+    save_undistorted(test_image, mtx, dist, roi)
+
+    # Load a test image (for now)
+    img = cv2.imread(test_image)
+    assert img is not None
+
+    # Un-distort it applying camera calibration
+    undistorted_img = undistort(img, mtx, dist, roi)
+
+    # Determine the pespective transform transform
+    M = find_perspective_transform(undistorted_img)
+
+    # Apply it to the source image
+    warped = cv2.warpPerspective(undistorted_img, M, undistorted_img.shape[1::-1])
+
+    # Go grayscale
     gscale = grayscale(warped)
 
     sobel_x = cv2.Sobel(gscale, cv2.CV_64F, 1, 0, ksize=3)
