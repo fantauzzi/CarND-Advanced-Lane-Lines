@@ -4,6 +4,8 @@ import matplotlib as mplib
 import numpy as np
 import os
 import glob
+import math
+from matplotlib.widgets import Slider
 
 # Directory containing images for caliration
 calibration_dir = 'camera_cal'
@@ -159,12 +161,14 @@ def try_intersect():
     x = find_x_given_y(5, c, d)
     assert x == 15
 
+
 def undistort(img, mtx, dist, roi):
     undistorted_img = cv2.undistort(img, mtx, dist, None, mtx)
     x, y, w, h = roi
     # cropped_img= undistorted_img[y:y + h, x:x + w]
     cropped_img = undistorted_img
     return cropped_img
+
 
 def find_perspective_transform(img):
     # Begin by finding the perspective vanishing point
@@ -228,19 +232,45 @@ def main():
     # Go grayscale
     gscale = grayscale(warped)
 
-    sobel_x = cv2.Sobel(gscale, cv2.CV_64F, 1, 0, ksize=3)
-    sobel_y = cv2.Sobel(gscale, cv2.CV_64F, 0, 1, ksize=3)
+    sobel_x = cv2.Sobel(gscale, cv2.CV_64F, 1, 0, ksize=5)
+    sobel_y = cv2.Sobel(gscale, cv2.CV_64F, 0, 1, ksize=5)
 
     grad_size = (sobel_x ** 2 + sobel_y ** 2) ** .5
     max_grad_size = np.max(grad_size)
     grad_size = np.uint8(grad_size / max_grad_size * 255)
-    grad_dir = np.arctan2(sobel_y, sobel_x)
+    grad_dir = np.abs(np.arctan2(sobel_y, sobel_x))
 
-    # sobel_8u = np.uint8(abs_sobel64f)
-
-    plt.figure()
-    plt.imshow(grad_size, cmap='gray')
+    import matplotlib.gridspec as gridspec
+    # plt.figure()
+    # plt.imshow(grad_size, cmap='gray')
     # plt.imshow(switch_RGB(warped))
+    grid = gridspec.GridSpec(4, 1, height_ratios=[4.5, .25, .25, .25])
+    picture = plt.subplot(grid[0, 0])
+    axes_image = plt.imshow(grad_size, cmap='gray')
+    axes_modulus = plt.subplot(grid[1, 0])
+    modulus_slider = Slider(axes_modulus, 'Grad modulus', 0, 255, 128)
+    axes_direction_min = plt.subplot(grid[2, 0])
+    min_direction_slider = Slider(axes_direction_min, 'Min direction', 0, math.pi, 0)  # TODO fix slidermax
+    axes_direction_max = plt.subplot(grid[3, 0])
+    max_direction_slider = Slider(axes_direction_max, 'Max direction', 0, math.pi, 0, slidermin=min_direction_slider)
+    plt.tight_layout(h_pad=0)
+    plt.subplots_adjust(left=.2, right=.9)
+
+    def update(val):
+        modulus = modulus_slider.val
+        min_direction = min_direction_slider.val
+        max_direction = max_direction_slider.val
+        thresholded = np.zeros_like(grad_size)
+        thresholded[
+            (grad_size >= modulus) &
+            (((grad_dir >= min_direction) & (grad_dir <= max_direction)) |
+             ((math.pi - grad_dir >= min_direction) & (math.pi - grad_dir <= max_direction)))] = 255
+        axes_image.set_data(thresholded)
+
+    modulus_slider.on_changed(update)
+    min_direction_slider.on_changed(update)
+    max_direction_slider.on_changed(update)
+
     plt.show()
 
 
