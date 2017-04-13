@@ -5,7 +5,8 @@ import numpy as np
 import os
 import glob
 import math
-from matplotlib.widgets import Slider
+import matplotlib.gridspec as gridspec
+from matplotlib.widgets import Slider, RadioButtons
 
 # Directory containing images for caliration
 calibration_dir = 'camera_cal'
@@ -101,7 +102,7 @@ def save_undistorted(f_name, mtx, dist, roi):
     f_basename = os.path.basename(f_name)
     output_f_name = os.path.splitext(f_basename)[0] + '.png'
     cv2.imwrite(output_dir + '/undistorted-' + output_f_name, undistorted_img)
-    plt.close()
+    plt.clf()  # plt.close() would generate an error 'can't invoke "event" command: application has been destroyed'
 
 
 def grayscale(img):
@@ -213,7 +214,7 @@ def main():
 
     #############################################################
     # test_image = 'test_images/straight_lines2.jpg'
-    test_image = 'test_images/test6.jpg'
+    test_image = 'test_images/test4.jpg'
     save_undistorted(test_image, mtx, dist, roi)
 
     # Load a test image (for now)
@@ -228,35 +229,70 @@ def main():
 
     # Apply it to the source image
     warped = cv2.warpPerspective(undistorted_img, M, undistorted_img.shape[1::-1])
+    # warped = cv2.GaussianBlur(warped, (5, 5), 0)
 
     # Go grayscale
     gscale = grayscale(warped)
 
-    sobel_x = cv2.Sobel(gscale, cv2.CV_64F, 1, 0, ksize=5)
-    sobel_y = cv2.Sobel(gscale, cv2.CV_64F, 0, 1, ksize=5)
+    # Set the grid
+    grid = gridspec.GridSpec(6, 1, height_ratios=[4.5, .25, .25, .25, 2, 1])
 
-    grad_size = (sobel_x ** 2 + sobel_y ** 2) ** .5
-    max_grad_size = np.max(grad_size)
-    grad_size = np.uint8(grad_size / max_grad_size * 255)
-    grad_dir = np.abs(np.arctan2(sobel_y, sobel_x))
-
-    import matplotlib.gridspec as gridspec
-    # plt.figure()
-    # plt.imshow(grad_size, cmap='gray')
-    # plt.imshow(switch_RGB(warped))
-    grid = gridspec.GridSpec(4, 1, height_ratios=[4.5, .25, .25, .25])
+    # Plot the image
     picture = plt.subplot(grid[0, 0])
-    axes_image = plt.imshow(grad_size, cmap='gray')
+    axes_image = plt.imshow(gscale, cmap='gray')
+
+    # Plot the sliders
     axes_modulus = plt.subplot(grid[1, 0])
     modulus_slider = Slider(axes_modulus, 'Grad modulus', 0, 255, 128)
     axes_direction_min = plt.subplot(grid[2, 0])
     min_direction_slider = Slider(axes_direction_min, 'Min direction', 0, math.pi, 0)  # TODO fix slidermax
     axes_direction_max = plt.subplot(grid[3, 0])
     max_direction_slider = Slider(axes_direction_max, 'Max direction', 0, math.pi, 0, slidermin=min_direction_slider)
+
+    # Plot the radio buttons
+    axes_color_space = plt.subplot(grid[4, 0])
+    radio_cspace = RadioButtons(axes_color_space, ('RGB', 'YUV', 'HSV', 'HLS', 'Lab'), active=1)
+    axes_channel = plt.subplot(grid[5, 0])
+    radio_channel = RadioButtons(axes_channel, ('1', '2', '3'), active=1)
+
     plt.tight_layout(h_pad=0)
     plt.subplots_adjust(left=.2, right=.9)
 
-    def update(val):
+    def find_gradient(gscale_img):
+        """
+        Returns the gradient modulus and direction absolute value for the given grayscale image.
+        Modulus is scaled to be in the range of integers [0, 255], direction to be in the real numbers interval
+        [0, Pi]
+        """
+        sobel_x = cv2.Sobel(gscale_img, cv2.CV_64F, 1, 0, ksize=5)
+        sobel_y = cv2.Sobel(gscale_img, cv2.CV_64F, 0, 1, ksize=5)
+        grad_size = (sobel_x ** 2 + sobel_y ** 2) ** .5
+        max_grad_size = np.max(grad_size)
+        grad_size = np.uint8(grad_size / max_grad_size * 255)
+        grad_dir = np.abs(np.arctan2(sobel_y, sobel_x))
+        return grad_size, grad_dir
+
+    def update(_):
+        # Start from the undistorted color image `warped` and convert it of color space if necessary
+        label = radio_cspace.value_selected
+        conversion = {'RGB': None,
+                      'YUV': cv2.COLOR_BGR2YUV,
+                      'HSV': cv2.COLOR_BGR2HSV,
+                      'HLS': cv2.COLOR_BGR2HLS,
+                      'Lab': cv2.COLOR_BGR2LAB}
+        converted = cv2.cvtColor(warped, conversion[label]) if conversion[label] is not None else np.copy(warped)
+
+        # Convert it to grayscale by keeping the required channel and discarding the other two
+        channel = int(radio_channel.value_selected) - 1
+        # RGB images are in memory as BGR, fix the channel number accordingly
+        if label == 'RGB':
+            channel = 2 - channel
+        gscale = converted[:, :, channel]
+
+        # Determine the gradient
+        grad_size, grad_dir = find_gradient(gscale)
+
+        # Threshold the gradient
         modulus = modulus_slider.val
         min_direction = min_direction_slider.val
         max_direction = max_direction_slider.val
@@ -265,11 +301,17 @@ def main():
             (grad_size >= modulus) &
             (((grad_dir >= min_direction) & (grad_dir <= max_direction)) |
              ((math.pi - grad_dir >= min_direction) & (math.pi - grad_dir <= max_direction)))] = 255
-        axes_image.set_data(thresholded)
 
+        # Display the udpated image, after thresholding
+        axes_image.set_data(thresholded)
+        plt.draw()
+
+    # Register call-backs with widgets
     modulus_slider.on_changed(update)
     min_direction_slider.on_changed(update)
     max_direction_slider.on_changed(update)
+    radio_cspace.on_clicked(update)
+    radio_channel.on_clicked(update)
 
     plt.show()
 
