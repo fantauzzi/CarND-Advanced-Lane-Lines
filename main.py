@@ -202,37 +202,29 @@ def find_perspective_transform(img):
     return M
 
 
-def main():
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
+def find_gradient(gscale_img):
+    """
+    Returns the gradient modulus and direction absolute value for the given grayscale image.
+    Modulus is scaled to be in the range of integers [0, 255], direction to be in the real numbers interval
+    [0, Pi]
+    """
+    sobel_x = cv2.Sobel(gscale_img, cv2.CV_64F, 1, 0, ksize=5)
+    sobel_y = cv2.Sobel(gscale_img, cv2.CV_64F, 0, 1, ksize=5)
+    grad_size = (sobel_x ** 2 + sobel_y ** 2) ** .5
+    max_grad_size = np.max(grad_size)
+    grad_size = np.uint8(grad_size / max_grad_size * 255)
+    grad_dir = np.abs(np.arctan2(sobel_y, sobel_x))
+    return grad_size, grad_dir
 
-    # Calibrate the camera
-    mtx, dist, rvecs, tvecs, roi = calibrate_camera()
 
-    # Save an image with one calibration sample along with its undistorted version
-    save_undistorted_sample(calibration_dir + '/calibration2.jpg', mtx, dist, roi)
-
-    #############################################################
-    # test_image = 'test_images/straight_lines2.jpg'
-    test_image = 'test_images/test3.jpg'
-    save_undistorted(test_image, mtx, dist, roi)
-
-    # Load a test image (for now)
-    img = cv2.imread(test_image)
-    assert img is not None
-
-    # Un-distort it applying camera calibration
-    undistorted_img = undistort(img, mtx, dist, roi)
-
-    # Determine the pespective transform transform
-    M = find_perspective_transform(undistorted_img)
-
-    # Apply it to the source image
-    warped = cv2.warpPerspective(undistorted_img, M, undistorted_img.shape[1::-1])
-    # warped = cv2.GaussianBlur(warped, (5, 5), 0)
+def params_browser(image):
+    """
+    Presents a dialog that allows interactive tuning of various parameters, and shows the effect on the given image.
+    The input image should be in BGR color space, already un-distorted and warped
+    """
 
     # Go grayscale
-    gscale = grayscale(warped)
+    gscale = grayscale(image)
 
     # Set the grid
     grid = gridspec.GridSpec(7, 1, height_ratios=[4.5, .25, .25, .25, 2, 1, .5])
@@ -248,7 +240,7 @@ def main():
     min_direction_slider = Slider(axes_direction_min, 'Min', valmin=0, valmax=1, valinit=0,
                                   valfmt='%1.3f')  # TODO fix slidermax
     axes_direction_max = plt.subplot(grid[3, 0])
-    max_direction_slider = Slider(axes_direction_max, 'Max', valmin=0, valmax=1, valinit=0, valfmt='%1.3f',
+    max_direction_slider = Slider(axes_direction_max, 'Max', valmin=0, valmax=1, valinit=1, valfmt='%1.3f',
                                   slidermin=min_direction_slider)
 
     # Plot the radio buttons
@@ -262,20 +254,6 @@ def main():
     plt.tight_layout(h_pad=0)
     plt.subplots_adjust(left=.2, right=.9)
 
-    def find_gradient(gscale_img):
-        """
-        Returns the gradient modulus and direction absolute value for the given grayscale image.
-        Modulus is scaled to be in the range of integers [0, 255], direction to be in the real numbers interval
-        [0, Pi]
-        """
-        sobel_x = cv2.Sobel(gscale_img, cv2.CV_64F, 1, 0, ksize=5)
-        sobel_y = cv2.Sobel(gscale_img, cv2.CV_64F, 0, 1, ksize=5)
-        grad_size = (sobel_x ** 2 + sobel_y ** 2) ** .5
-        max_grad_size = np.max(grad_size)
-        grad_size = np.uint8(grad_size / max_grad_size * 255)
-        grad_dir = np.abs(np.arctan2(sobel_y, sobel_x))
-        return grad_size, grad_dir
-
     def update(_):
         # Start from the undistorted color image `warped` and convert it of color space if necessary
         label = radio_cspace.value_selected
@@ -284,7 +262,7 @@ def main():
                       'HSV': cv2.COLOR_BGR2HSV,
                       'HLS': cv2.COLOR_BGR2HLS,
                       'Lab': cv2.COLOR_BGR2LAB}
-        converted = cv2.cvtColor(warped, conversion[label]) if conversion[label] is not None else np.copy(warped)
+        converted = cv2.cvtColor(image, conversion[label]) if conversion[label] is not None else np.copy(image)
 
         take_gradient = True if radio_grad.value_selected == 'Gradient' else False
 
@@ -324,6 +302,181 @@ def main():
     radio_channel.on_clicked(update)
     radio_grad.on_clicked(update)
 
+    plt.show()
+
+
+def window_mask(width, height, img_ref, center, level):
+    output = np.zeros_like(img_ref)
+    output[int(img_ref.shape[0] - (level + 1) * height):int(img_ref.shape[0] - level * height),
+    max(0, int(center - width / 2)):min(int(center + width / 2), img_ref.shape[1])] = 1
+    return output
+
+
+def find_window_centroids(thresholded, window_width, window_height, margin):
+    min_acceptable = 100
+    window_centroids = []  # Store the (left,right) window centroid positions per level
+    window = np.ones(window_width)  # Create our window template that we will use for convolutions
+
+    # First find the two starting positions for the left and right lane by using np.sum to get the vertical image slice
+    # and then np.convolve the vertical image slice with the window template
+
+    # Sum quarter bottom of image to get slice, could use a different ratio
+    l_sum = np.sum(thresholded[int(3 * thresholded.shape[0] / 4):, :int(thresholded.shape[1] / 2)], axis=0)
+    l_center = np.argmax(np.convolve(window, l_sum)) - window_width / 2
+    last_good_l_center = l_center
+    r_sum = np.sum(thresholded[int(3 * thresholded.shape[0] / 4):, int(thresholded.shape[1] / 2):], axis=0)
+    r_center = np.argmax(np.convolve(window, r_sum)) - window_width / 2 + int(thresholded.shape[1] / 2)
+    last_good_r_center = r_center
+
+    # Add what we found for the first layer
+    window_centroids.append((l_center, r_center))
+
+    # Go through each layer looking for max pixel locations
+    for level in range(1, (int)(thresholded.shape[0] / window_height)):
+        # convolve the window into the vertical slice of the image
+        image_layer = np.sum(
+            thresholded[
+            int(thresholded.shape[0] - (level + 1) * window_height):int(thresholded.shape[0] - level * window_height),
+            :],
+            axis=0)
+        conv_signal = np.convolve(window, image_layer)
+        # Find the best left centroid by using past left center as a reference
+        # Use window_width/2 as offset because convolution signal reference is at right side of window, not center of window
+        offset = window_width / 2
+        l_min_index = int(max(last_good_l_center + offset - margin, 0))
+        l_max_index = int(min(last_good_l_center + offset + margin, thresholded.shape[1]))
+        goodness = np.max(conv_signal[l_min_index:l_max_index])
+        if goodness >= min_acceptable:
+            l_center = np.argmax(conv_signal[l_min_index:l_max_index]) + l_min_index - offset
+            last_good_l_center = l_center
+        else:
+            l_center = None
+        # Find the best right centroid by using past right center as a reference
+        r_min_index = int(max(last_good_r_center + offset - margin, 0))
+        r_max_index = int(min(last_good_r_center + offset + margin, thresholded.shape[1]))
+        goodness = np.max(conv_signal[r_min_index:r_max_index])
+        if goodness >= min_acceptable:
+            r_center = np.argmax(conv_signal[r_min_index:r_max_index]) + r_min_index - offset
+            last_good_r_center = r_center
+        else:
+            r_center = None
+        # Add what we found for that layer
+        window_centroids.append((l_center, r_center))
+
+    return window_centroids
+
+
+def main():
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    # Calibrate the camera
+    mtx, dist, rvecs, tvecs, roi = calibrate_camera()
+
+    # Save an image with one calibration sample along with its undistorted version
+    save_undistorted_sample(calibration_dir + '/calibration2.jpg', mtx, dist, roi)
+
+    #############################################################
+    # test_image = 'test_images/straight_lines2.jpg'
+    test_image = 'test_images/test1.jpg'
+    save_undistorted(test_image, mtx, dist, roi)
+
+    # Load a test image (for now)
+    img = cv2.imread(test_image)
+    assert img is not None
+
+    # Un-distort it applying camera calibration
+    undistorted_img = undistort(img, mtx, dist, roi)
+
+    # Determine the pespective transform transform
+    M = find_perspective_transform(undistorted_img)
+
+    # Apply it to the source image
+    warped = cv2.warpPerspective(undistorted_img, M, undistorted_img.shape[1::-1])
+
+    # params_browser(warped)
+
+    hls = cv2.cvtColor(warped, cv2.COLOR_BGR2HLS)
+    l_channel = hls[:, :, 1]
+    grad_size, grad_dir = find_gradient(l_channel)
+    min_grad_size = 18
+    min_grad_dir = 0
+    max_grad_dir = 0.367 * math.pi / 2
+    thresholded_grad = np.zeros_like(l_channel)
+    thresholded_grad[(grad_size >= min_grad_size) & (((grad_dir >= min_grad_dir) & (grad_dir <= max_grad_dir)) | (
+        (grad_dir >= math.pi - max_grad_dir) & (grad_dir <= math.pi - min_grad_dir)))] = 255
+    r_channel = warped[:, :, 2]
+    min_r = int(0.881 * 255)
+    max_r = 255
+    thresholded_r = np.zeros_like(r_channel)
+    thresholded_r[(r_channel >= min_r) & (r_channel <= max_r)] = 255
+    thresholded = np.zeros_like(l_channel)
+    thresholded[(thresholded_grad == 255) | (thresholded_r == 255)] = 255
+    # plt.imshow(thresholded, cmap='gray')
+    # plt.show()
+
+    window_width = 50
+    window_height = 80  # Break image into 9 vertical layers since image height is 720
+    margin = 100  # How much to slide left and right for searching
+    window_centroids = find_window_centroids(thresholded, window_width, window_height, margin)
+
+    # If we found any window centers
+    if len(window_centroids) > 0:
+
+        # Points used to draw all the left and right windows
+        # l_points = np.zeros_like(warped)
+        # r_points = np.zeros_like(warped)
+        l_points = np.zeros_like(thresholded)
+        r_points = np.zeros_like(thresholded)
+
+        l_lane_points = np.zeros_like(thresholded)
+        r_lane_points = np.zeros_like(thresholded)
+
+        # Go through each level and draw the windows
+        for level in range(0, len(window_centroids)):
+            # Window_mask is a function to draw window areas
+            # Add graphic points from window mask here to total pixels found
+            if window_centroids[level][0] is not None:
+                l_mask = window_mask(window_width, window_height, thresholded, window_centroids[level][0], level)
+                l_lane_points[(l_mask==1) & (thresholded==255)] = 255
+                l_points[(l_points == 255) | ((l_mask == 1))] = 255
+            if window_centroids[level][1] is not None:
+                r_mask = window_mask(window_width, window_height, thresholded, window_centroids[level][1], level)
+                r_lane_points[(r_mask==1) & (thresholded==255)] = 255
+                r_points[(r_points == 255) | ((r_mask == 1))] = 255
+
+        # Draw the results
+        template = np.array(r_points + l_points, np.uint8)  # add both left and right window pixels together
+        zero_channel = np.zeros_like(template)  # create a zero color channel
+        template = np.array(cv2.merge((zero_channel, template, zero_channel)), np.uint8)  # make window pixels green
+        warpage = np.array(cv2.merge((thresholded, thresholded, thresholded)),
+                           np.uint8)  # making the original road pixels 3 color channels
+        output = cv2.addWeighted(warpage, 1, template, 0.5, 0.0)  # overlay the orignal road image with window results
+
+    # If no window centers found, just display orginal road image
+    else:
+        output = np.array(cv2.merge((thresholded, thresholded, thresholded)), np.uint8)
+
+    l_point_coords = np.where(l_lane_points==255)
+    r_point_coords = np.where(r_lane_points == 255)
+    '''assert len(l_point_coords[0])==len(l_point_coords[1])
+    for i in range(len(l_point_coords[0])):
+        assert l_lane_points[l_point_coords[0][i], l_point_coords[1][i]] == 255'''
+
+    l_fit = np.polyfit(l_point_coords[0], l_point_coords[1], 2)
+    r_fit = np.polyfit(r_point_coords[0], r_point_coords[1], 2)
+    ploty = np.linspace(0, thresholded.shape[0] - 1, thresholded.shape[0])
+    l_fitx = l_fit[0] * ploty ** 2 + l_fit[1] * ploty + l_fit[2]
+    r_fitx = r_fit[0] * ploty ** 2 + r_fit[1] * ploty + r_fit[2]
+    plt.plot(l_fitx, ploty, color='yellow')
+    plt.plot(r_fitx, ploty, color='yellow')
+
+
+
+    # Display the final results
+    # plt.imshow(output)
+    plt.imshow(r_lane_points+l_lane_points, cmap='gray')
+    # plt.title('window fitting results')
     plt.show()
 
 
