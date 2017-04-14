@@ -6,7 +6,7 @@ import os
 import glob
 import math
 import matplotlib.gridspec as gridspec
-from matplotlib.widgets import Slider, RadioButtons
+from matplotlib.widgets import Slider, RadioButtons, CheckButtons
 
 # Directory containing images for caliration
 calibration_dir = 'camera_cal'
@@ -214,7 +214,7 @@ def main():
 
     #############################################################
     # test_image = 'test_images/straight_lines2.jpg'
-    test_image = 'test_images/test4.jpg'
+    test_image = 'test_images/test3.jpg'
     save_undistorted(test_image, mtx, dist, roi)
 
     # Load a test image (for now)
@@ -235,7 +235,7 @@ def main():
     gscale = grayscale(warped)
 
     # Set the grid
-    grid = gridspec.GridSpec(6, 1, height_ratios=[4.5, .25, .25, .25, 2, 1])
+    grid = gridspec.GridSpec(7, 1, height_ratios=[4.5, .25, .25, .25, 2, 1, .5])
 
     # Plot the image
     picture = plt.subplot(grid[0, 0])
@@ -243,17 +243,21 @@ def main():
 
     # Plot the sliders
     axes_modulus = plt.subplot(grid[1, 0])
-    modulus_slider = Slider(axes_modulus, 'Grad modulus', 0, 255, 128)
+    modulus_slider = Slider(axes_modulus, 'Grad modulus', valmin=0, valmax=255, valinit=128)
     axes_direction_min = plt.subplot(grid[2, 0])
-    min_direction_slider = Slider(axes_direction_min, 'Min direction', 0, math.pi, 0)  # TODO fix slidermax
+    min_direction_slider = Slider(axes_direction_min, 'Min', valmin=0, valmax=1, valinit=0,
+                                  valfmt='%1.3f')  # TODO fix slidermax
     axes_direction_max = plt.subplot(grid[3, 0])
-    max_direction_slider = Slider(axes_direction_max, 'Max direction', 0, math.pi, 0, slidermin=min_direction_slider)
+    max_direction_slider = Slider(axes_direction_max, 'Max', valmin=0, valmax=1, valinit=0, valfmt='%1.3f',
+                                  slidermin=min_direction_slider)
 
     # Plot the radio buttons
     axes_color_space = plt.subplot(grid[4, 0])
     radio_cspace = RadioButtons(axes_color_space, ('RGB', 'YUV', 'HSV', 'HLS', 'Lab'), active=1)
     axes_channel = plt.subplot(grid[5, 0])
-    radio_channel = RadioButtons(axes_channel, ('1', '2', '3'), active=1)
+    radio_channel = RadioButtons(axes_channel, ('1', '2', '3'), active=0)
+    axes_enable_grad = plt.subplot(grid[6, 0])
+    radio_grad = RadioButtons(axes_enable_grad, ('Gradient', 'Channel'), active=0)
 
     plt.tight_layout(h_pad=0)
     plt.subplots_adjust(left=.2, right=.9)
@@ -282,6 +286,8 @@ def main():
                       'Lab': cv2.COLOR_BGR2LAB}
         converted = cv2.cvtColor(warped, conversion[label]) if conversion[label] is not None else np.copy(warped)
 
+        take_gradient = True if radio_grad.value_selected == 'Gradient' else False
+
         # Convert it to grayscale by keeping the required channel and discarding the other two
         channel = int(radio_channel.value_selected) - 1
         # RGB images are in memory as BGR, fix the channel number accordingly
@@ -289,18 +295,22 @@ def main():
             channel = 2 - channel
         gscale = converted[:, :, channel]
 
-        # Determine the gradient
-        grad_size, grad_dir = find_gradient(gscale)
-
-        # Threshold the gradient
-        modulus = modulus_slider.val
         min_direction = min_direction_slider.val
         max_direction = max_direction_slider.val
-        thresholded = np.zeros_like(grad_size)
-        thresholded[
-            (grad_size >= modulus) &
-            (((grad_dir >= min_direction) & (grad_dir <= max_direction)) |
-             ((math.pi - grad_dir >= min_direction) & (math.pi - grad_dir <= max_direction)))] = 255
+        thresholded = np.zeros_like(gscale)
+        if take_gradient:
+            min_direction *= math.pi / 2
+            max_direction *= math.pi / 2
+            modulus = modulus_slider.val
+            # Determine the gradient
+            grad_size, grad_dir = find_gradient(gscale)
+            # Threshold the gradient
+            thresholded[(grad_size >= modulus) & (((grad_dir >= min_direction) & (grad_dir <= max_direction)) | (
+                (grad_dir >= math.pi - max_direction) & (grad_dir <= math.pi - min_direction)))] = 255
+        else:
+            min_direction = round(min_direction * 255)
+            max_direction = round(max_direction * 255)
+            thresholded[(gscale >= min_direction) & (gscale <= max_direction)] = 255
 
         # Display the udpated image, after thresholding
         axes_image.set_data(thresholded)
@@ -312,6 +322,7 @@ def main():
     max_direction_slider.on_changed(update)
     radio_cspace.on_clicked(update)
     radio_channel.on_clicked(update)
+    radio_grad.on_clicked(update)
 
     plt.show()
 
