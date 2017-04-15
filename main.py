@@ -5,6 +5,7 @@ import numpy as np
 import os
 import glob
 import math
+import time
 import matplotlib.gridspec as gridspec
 from matplotlib.widgets import Slider, RadioButtons, CheckButtons
 
@@ -366,36 +367,7 @@ def find_window_centroids(thresholded, window_width, window_height, margin):
     return window_centroids
 
 
-def main():
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-
-    # Calibrate the camera
-    mtx, dist, rvecs, tvecs, roi = calibrate_camera()
-
-    # Save an image with one calibration sample along with its undistorted version
-    save_undistorted_sample(calibration_dir + '/calibration2.jpg', mtx, dist, roi)
-
-    #############################################################
-    # test_image = 'test_images/straight_lines2.jpg'
-    test_image = 'test_images/test1.jpg'
-    save_undistorted(test_image, mtx, dist, roi)
-
-    # Load a test image (for now)
-    img = cv2.imread(test_image)
-    assert img is not None
-
-    # Un-distort it applying camera calibration
-    undistorted_img = undistort(img, mtx, dist, roi)
-
-    # Determine the pespective transform transform
-    M = find_perspective_transform(undistorted_img)
-
-    # Apply it to the source image
-    warped = cv2.warpPerspective(undistorted_img, M, undistorted_img.shape[1::-1])
-
-    # params_browser(warped)
-
+def threshold(warped):
     hls = cv2.cvtColor(warped, cv2.COLOR_BGR2HLS)
     l_channel = hls[:, :, 1]
     grad_size, grad_dir = find_gradient(l_channel)
@@ -412,9 +384,12 @@ def main():
     thresholded_r[(r_channel >= min_r) & (r_channel <= max_r)] = 255
     thresholded = np.zeros_like(l_channel)
     thresholded[(thresholded_grad == 255) | (thresholded_r == 255)] = 255
-    # plt.imshow(thresholded, cmap='gray')
+    plt.imshow(thresholded, cmap='gray')
+    return thresholded
     # plt.show()
 
+
+def fit(thresholded):
     window_width = 50
     window_height = 80  # Break image into 9 vertical layers since image height is 720
     margin = 100  # How much to slide left and right for searching
@@ -438,11 +413,11 @@ def main():
             # Add graphic points from window mask here to total pixels found
             if window_centroids[level][0] is not None:
                 l_mask = window_mask(window_width, window_height, thresholded, window_centroids[level][0], level)
-                l_lane_points[(l_mask==1) & (thresholded==255)] = 255
+                l_lane_points[(l_mask == 1) & (thresholded == 255)] = 255
                 l_points[(l_points == 255) | ((l_mask == 1))] = 255
             if window_centroids[level][1] is not None:
                 r_mask = window_mask(window_width, window_height, thresholded, window_centroids[level][1], level)
-                r_lane_points[(r_mask==1) & (thresholded==255)] = 255
+                r_lane_points[(r_mask == 1) & (thresholded == 255)] = 255
                 r_points[(r_points == 255) | ((r_mask == 1))] = 255
 
         # Draw the results
@@ -451,33 +426,94 @@ def main():
         template = np.array(cv2.merge((zero_channel, template, zero_channel)), np.uint8)  # make window pixels green
         warpage = np.array(cv2.merge((thresholded, thresholded, thresholded)),
                            np.uint8)  # making the original road pixels 3 color channels
-        output = cv2.addWeighted(warpage, 1, template, 0.5, 0.0)  # overlay the orignal road image with window results
+        output = cv2.addWeighted(warpage, 1, template, 0.5,
+                                 0.0)  # overlay the orignal road image with window results
 
     # If no window centers found, just display orginal road image
     else:
         output = np.array(cv2.merge((thresholded, thresholded, thresholded)), np.uint8)
 
-    l_point_coords = np.where(l_lane_points==255)
+    l_point_coords = np.where(l_lane_points == 255)
     r_point_coords = np.where(r_lane_points == 255)
-    '''assert len(l_point_coords[0])==len(l_point_coords[1])
-    for i in range(len(l_point_coords[0])):
-        assert l_lane_points[l_point_coords[0][i], l_point_coords[1][i]] == 255'''
 
     l_fit = np.polyfit(l_point_coords[0], l_point_coords[1], 2)
     r_fit = np.polyfit(r_point_coords[0], r_point_coords[1], 2)
-    ploty = np.linspace(0, thresholded.shape[0] - 1, thresholded.shape[0])
-    l_fitx = l_fit[0] * ploty ** 2 + l_fit[1] * ploty + l_fit[2]
-    r_fitx = r_fit[0] * ploty ** 2 + r_fit[1] * ploty + r_fit[2]
-    plt.plot(l_fitx, ploty, color='yellow')
-    plt.plot(r_fitx, ploty, color='yellow')
+    # plt.imshow(r_lane_points+l_lane_points, cmap='gray')
+    return l_fit, r_fit, r_lane_points+l_lane_points
 
+
+def main():
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    # Calibrate the camera
+    mtx, dist, rvecs, tvecs, roi = calibrate_camera()
+
+    # Save an image with one calibration sample along with its undistorted version
+    save_undistorted_sample(calibration_dir + '/calibration2.jpg', mtx, dist, roi)
+
+    #############################################################
+    # test_image = 'test_images/straight_lines2.jpg'
+    test_image = 'test_images/test1.jpg'
+    save_undistorted(test_image, mtx, dist, roi)
+
+    # Load a test image (for now)
+    img = cv2.imread(test_image)
+    assert img is not None
+
+    vidcap = cv2.VideoCapture('project_video.mp4')
+    fps = vidcap.get(cv2.CAP_PROP_FPS)
+    print('Source video is at',fps,'fps')
+    fourcc = cv2.VideoWriter_fourcc(*'XVID')
+    vidwrite = cv2.VideoWriter('out.mp4', fourcc=fourcc, fps=fps, frameSize=(1280, 720))
+
+    count = 0
+    start_time=time.time()
+    while(True):
+        read, frame = vidcap.read()
+        if not read:
+            break
+
+        # Un-distort it applying camera calibration
+        undistorted_img = undistort(frame, mtx, dist, roi)
+
+        # Determine the pespective transform transform
+        M = find_perspective_transform(undistorted_img)
+
+        # Apply it to the source image
+        warped = cv2.warpPerspective(undistorted_img, M, undistorted_img.shape[1::-1])
+
+        # params_browser(warped)
+
+        # Threshold the warped image
+        thresholded = threshold(warped)
+
+        # Find the lane marking lines
+        l_fit, r_fit, lane_points = fit(thresholded)
+
+        color_lane_points = np.array(cv2.merge((lane_points, lane_points, lane_points)), np.uint8)
+
+        ploty = np.linspace(0, thresholded.shape[0] - 1, thresholded.shape[0])
+        l_fitx = l_fit[0] * ploty ** 2 + l_fit[1] * ploty + l_fit[2]
+        r_fitx = r_fit[0] * ploty ** 2 + r_fit[1] * ploty + r_fit[2]
+        l_fit_points = np.array((l_fitx, ploty), np.int32).T
+        l_fit_points = l_fit_points.reshape((-1, 1, 2))
+        r_fit_points = np.array((r_fitx, ploty), np.int32).T
+        r_fit_points = r_fit_points.reshape((-1, 1, 2))
+        color_lane_points = cv2.polylines(color_lane_points, [r_fit_points, l_fit_points], False, (0, 0, 255))
+        color_lane_points = cv2.addWeighted(undistorted_img,.5 , color_lane_points, .5, 0)
+        vidwrite.write(color_lane_points)
+        count += 1
+        if count % 30 == 0:
+            print('.', end='', sep='', flush=True)
+
+    print('\nRate',count/(time.time()-start_time),'fps.')
 
 
     # Display the final results
     # plt.imshow(output)
-    plt.imshow(r_lane_points+l_lane_points, cmap='gray')
     # plt.title('window fitting results')
-    plt.show()
+    # plt.show()
 
 
 if __name__ == '__main__':
