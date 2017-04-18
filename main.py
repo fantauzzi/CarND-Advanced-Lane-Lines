@@ -1,13 +1,13 @@
 import cv2
 import matplotlib.pyplot as plt
-import matplotlib as mplib
 import numpy as np
 import os
 import glob
 import math
 import time
 import matplotlib.gridspec as gridspec
-from matplotlib.widgets import Slider, RadioButtons, CheckButtons
+from matplotlib.widgets import Slider, RadioButtons
+from enum import IntEnum
 
 # Directory containing images for caliration
 calibration_dir = 'camera_cal'
@@ -49,6 +49,15 @@ def calibrate_camera():
     ret, mtx, dist, rvecs, tvecs = cv2.calibrateCamera(obj_points, img_points, img_size, None, None)
     h, w = img.shape[:2]
     new_mtx, roi = cv2.getOptimalNewCameraMatrix(mtx, dist, (w, h), 1, (w, h))
+
+    mean_error = 0
+    for i in range(len(obj_points)):
+        img_points2, _ = cv2.projectPoints(obj_points[i], rvecs[i], tvecs[i], mtx, dist)
+        error = cv2.norm(img_points[i], img_points2, cv2.NORM_L2) / len(img_points2)
+        mean_error += error
+        assert error >= 0
+    print("Calibration error: ", mean_error / len(obj_points))
+
     return new_mtx, dist, rvecs, tvecs, roi
 
 
@@ -104,16 +113,6 @@ def save_undistorted(f_name, mtx, dist, roi):
     output_f_name = os.path.splitext(f_basename)[0] + '.png'
     cv2.imwrite(output_dir + '/undistorted-' + output_f_name, undistorted_img)
     plt.clf()  # plt.close() would generate an error 'can't invoke "event" command: application has been destroyed'
-
-
-def grayscale(img):
-    '''
-    Converts the given image from BGR to gray-scale and returns the result 
-    '''
-    gscale_img = cv2.cvtColor(img, cv2.COLOR_BGR2YUV)
-    return gscale_img[:, :, 0]
-    # gscale_img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    # return gscale_img
 
 
 def find_line_params(p0, p1):
@@ -173,13 +172,19 @@ def undistort(img, mtx, dist, roi):
 
 
 def find_perspective_transform(img):
+    target_shape = (img.shape[0], img.shape[1])  # (rows, columns)
+
     # Begin by finding the perspective vanishing point
     lane_l = ((264, 688), (621, 431))  # Two points identifying the line going along the left lane marking
     lane_r = ((660, 431), (1059, 688))  # Two points identifying the line going along right lane marking
     v_point = find_intersect(*lane_l, *lane_r)  # Intersection of the two lines above (perspective vanishing point)
+    lane_l2 = ((0, target_shape[0] - 1), v_point)  # Two points identifying the line going along the left lane marking
+    lane_r2 = ((target_shape[1] - 1, target_shape[0] - 1),
+               (v_point))  # Two points identifying the line going along right lane marking
 
     # Determine a quadrangle in the source image
     source_h = img.shape[0]
+    # y1, y2 = round((source_h - v_point[1]) * .13 + v_point[1]), source_h - 51
     y1, y2 = round((source_h - v_point[1]) * .13 + v_point[1]), source_h - 51
     assert v_point[1] <= y1 <= source_h - 1
     assert v_point[1] <= y2 <= source_h - 1
@@ -191,11 +196,14 @@ def find_perspective_transform(img):
     ])
 
     # Determine the corresponing quandrangle in the target (destination) image
-    target_shape = (img.shape[0], img.shape[1])  # (rows, columns)
     target = np.float32([[source[0, 0], target_shape[0] - 1],
                          [source[0, 0], 0],
                          [source[3, 0], 0],
                          [source[3, 0], target_shape[0] - 1]])
+    '''target = np.float32([[0, target_shape[0] - 1],
+                         [0, 0],
+                         [target_shape[1] - 1, 0],
+                         [target_shape[1] - 1, target_shape[0] - 1]])'''
 
     # Given the source and target quandrangles, calculate the perspective transform matrix
     source = np.expand_dims(source, 1)  # OpenCV requires this extra dimension
@@ -223,6 +231,15 @@ def params_browser(image):
     Presents a dialog that allows interactive tuning of various parameters, and shows the effect on the given image.
     The input image should be in BGR color space, already un-distorted and warped
     """
+
+    def grayscale(img):
+        '''
+        Converts the given image from BGR to gray-scale and returns the result 
+        '''
+        gscale_img = cv2.cvtColor(img, cv2.COLOR_BGR2YUV)
+        return gscale_img[:, :, 0]
+        # gscale_img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        # return gscale_img
 
     # Go grayscale
     gscale = grayscale(image)
@@ -293,6 +310,7 @@ def params_browser(image):
 
         # Display the udpated image, after thresholding
         axes_image.set_data(thresholded)
+        # axes_image.set_data(gscale)
         plt.draw()
 
     # Register call-backs with widgets
@@ -313,133 +331,176 @@ def window_mask(width, height, img_ref, center, level):
     return output
 
 
-def find_window_centroids(thresholded, window_width, window_height, margin):
-    min_acceptable = 100
-    window_centroids = []  # Store the (left,right) window centroid positions per level
-    window = np.ones(window_width)  # Create our window template that we will use for convolutions
+def threshold(warped):
+    masks = (((0, 100, 100), (50, 255, 255)),
+             ((18, 0, 180), (255, 80, 255)),
+             ((4, 0, 180), (15, 80, 255)))
+    hsv = cv2.cvtColor(warped, cv2.COLOR_BGR2HSV)
+    thresholded = np.zeros_like(hsv[:, :, 0])
+    MIN, MAX = 0, 1
+    H, S, V = 0, 1, 2
+    grad_size, grad_dir = find_gradient(hsv[:, :, 2])
+    min_grad_size = 8
+    min_grad_dir = 0
+    # max_grad_dir = 0.367 * math.pi / 2
+    max_grad_dir = 0.5 * math.pi / 2
+    for mask in masks:
+        thresholded[(mask[MIN][H] <= hsv[:, :, H]) &
+                    (mask[MAX][H] >= hsv[:, :, H]) &
+                    (mask[MIN][S] <= hsv[:, :, S]) &
+                    (mask[MAX][S] >= hsv[:, :, S]) &
+                    (mask[MIN][V] <= hsv[:, :, V]) &
+                    (mask[MAX][V] >= hsv[:, :, V]) &
+                    (grad_size >= min_grad_size) &
+                    (grad_dir <= max_grad_dir)] = 255
+    return thresholded
 
-    # First find the two starting positions for the left and right lane by using np.sum to get the vertical image slice
-    # and then np.convolve the vertical image slice with the window template
 
-    # Sum quarter bottom of image to get slice, could use a different ratio
-    l_sum = np.sum(thresholded[int(3 * thresholded.shape[0] / 4):, :int(thresholded.shape[1] / 2)], axis=0)
-    l_center = np.argmax(np.convolve(window, l_sum)) - window_width / 2
-    last_good_l_center = l_center
-    r_sum = np.sum(thresholded[int(3 * thresholded.shape[0] / 4):, int(thresholded.shape[1] / 2):], axis=0)
-    r_center = np.argmax(np.convolve(window, r_sum)) - window_width / 2 + int(thresholded.shape[1] / 2)
-    last_good_r_center = r_center
+class Lines:
+    class Side(IntEnum):
+        LEFT = 0
+        RIGHT = 1
 
-    # Add what we found for the first layer
-    window_centroids.append((l_center, r_center))
+    def __init__(self):
+        self.coefficients = [None, None]
+        self.lane_points = [None, None]
+        self.centroids = None
+        self.centroid_window_width = 100
+        self.centroid_window_height = 80
+        self.centroid_window_margin = 100
 
-    # Go through each layer looking for max pixel locations
-    for level in range(1, (int)(thresholded.shape[0] / window_height)):
-        # convolve the window into the vertical slice of the image
-        image_layer = np.sum(
-            thresholded[
-            int(thresholded.shape[0] - (level + 1) * window_height):int(thresholded.shape[0] - level * window_height),
-            :],
-            axis=0)
-        conv_signal = np.convolve(window, image_layer)
-        # Find the best left centroid by using past left center as a reference
-        # Use window_width/2 as offset because convolution signal reference is at right side of window, not center of window
-        offset = window_width / 2
-        l_min_index = int(max(last_good_l_center + offset - margin, 0))
-        l_max_index = int(min(last_good_l_center + offset + margin, thresholded.shape[1]))
-        goodness = np.max(conv_signal[l_min_index:l_max_index])
-        if goodness >= min_acceptable:
-            l_center = np.argmax(conv_signal[l_min_index:l_max_index]) + l_min_index - offset
-            last_good_l_center = l_center
-        else:
-            l_center = None
-        # Find the best right centroid by using past right center as a reference
-        r_min_index = int(max(last_good_r_center + offset - margin, 0))
-        r_max_index = int(min(last_good_r_center + offset + margin, thresholded.shape[1]))
-        goodness = np.max(conv_signal[r_min_index:r_max_index])
-        if goodness >= min_acceptable:
-            r_center = np.argmax(conv_signal[r_min_index:r_max_index]) + r_min_index - offset
-            last_good_r_center = r_center
-        else:
-            r_center = None
-        # Add what we found for that layer
+    def find_window_centroids(self, thresholded, window_width, window_height, margin):
+        min_acceptable = 1.
+        window_centroids = []  # Store the (left,right) window centroid positions per level
+        window = np.ones(window_width)  # Create our window template that we will use for convolutions
+
+        # First find the two starting positions for the left and right lane by using np.sum to get the vertical image slice
+        # and then np.convolve the vertical image slice with the window template
+
+        # Sum quarter bottom of image to get slice, could use a different ratio
+        l_sum = np.sum(thresholded[int(3 * thresholded.shape[0] / 4):, :int(thresholded.shape[1] / 2)], axis=0)
+        l_center = np.argmax(np.convolve(window, l_sum)) - window_width / 2
+        last_good_l_center = l_center
+        r_sum = np.sum(thresholded[int(3 * thresholded.shape[0] / 4):, int(thresholded.shape[1] / 2):], axis=0)
+        r_center = np.argmax(np.convolve(window, r_sum)) - window_width / 2 + int(thresholded.shape[1] / 2)
+        last_good_r_center = r_center
+
+        # Add what we found for the first layer
         window_centroids.append((l_center, r_center))
 
-    return window_centroids
+        # Go through each layer looking for max pixel locations
+        for level in range(1, (int)(thresholded.shape[0] / window_height)):
+            # convolve the window into the vertical slice of the image
+            image_layer = np.sum(
+                thresholded[
+                int(thresholded.shape[0] - (level + 1) * window_height):int(
+                    thresholded.shape[0] - level * window_height),
+                :],
+                axis=0)
+            conv_signal = np.convolve(window, image_layer)
+            # Find the best left centroid by using past left center as a reference
+            # Use window_width/2 as offset because convolution signal reference is at right side of window, not center of window
+            offset = window_width / 2
+            l_min_index = int(max(last_good_l_center + offset - margin, 0))
+            l_max_index = int(min(last_good_l_center + offset + margin, thresholded.shape[1]))
+            goodness = np.max(conv_signal[l_min_index:l_max_index])
+            if goodness >= min_acceptable:
+                l_center = np.argmax(conv_signal[l_min_index:l_max_index]) + l_min_index - offset
+                last_good_l_center = l_center
+            else:
+                l_center = None
+            # Find the best right centroid by using past right center as a reference
+            r_min_index = int(max(last_good_r_center + offset - margin, 0))
+            r_max_index = int(min(last_good_r_center + offset + margin, thresholded.shape[1]))
+            goodness = np.max(conv_signal[r_min_index:r_max_index])
+            if goodness >= min_acceptable:
+                r_center = np.argmax(conv_signal[r_min_index:r_max_index]) + r_min_index - offset
+                last_good_r_center = r_center
+            else:
+                r_center = None
+            # Add what we found for that layer
+            window_centroids.append((l_center, r_center))
 
+        return window_centroids
 
-def threshold(warped):
-    hls = cv2.cvtColor(warped, cv2.COLOR_BGR2HLS)
-    l_channel = hls[:, :, 1]
-    grad_size, grad_dir = find_gradient(l_channel)
-    min_grad_size = 18
-    min_grad_dir = 0
-    max_grad_dir = 0.367 * math.pi / 2
-    thresholded_grad = np.zeros_like(l_channel)
-    thresholded_grad[(grad_size >= min_grad_size) & (((grad_dir >= min_grad_dir) & (grad_dir <= max_grad_dir)) | (
-        (grad_dir >= math.pi - max_grad_dir) & (grad_dir <= math.pi - min_grad_dir)))] = 255
-    r_channel = warped[:, :, 2]
-    min_r = int(0.881 * 255)
-    max_r = 255
-    thresholded_r = np.zeros_like(r_channel)
-    thresholded_r[(r_channel >= min_r) & (r_channel <= max_r)] = 255
-    thresholded = np.zeros_like(l_channel)
-    thresholded[(thresholded_grad == 255) | (thresholded_r == 255)] = 255
-    plt.imshow(thresholded, cmap='gray')
-    return thresholded
-    # plt.show()
+    def fit(self, thresholded):
+        """
+        Fits the given single-channel image, which should be the output of thresholding, with two lines,
+        that should correspond to the left and right lane markers. On exit, self.coefficients holds coefficients
+        for the two lines, and self.lane_points holds two lists of point coordinates, that belong to the respective lane
+        lines.
+        """
+        window_width = self.centroid_window_width
+        window_height = self.centroid_window_height  # Break image into 9 vertical layers since image height is 720
+        assert thresholded.shape[0] % window_height == 0
+        margin = self.centroid_window_margin  # How much to slide left and right for searching
+        # A list of pairs, each pair is the x coordinates for a left and right centroid
+        self.centroids = self.find_window_centroids(thresholded, window_width, window_height, margin)
 
+        # If we found any window centers
+        if len(self.centroids) > 0:
 
-def fit(thresholded):
-    window_width = 50
-    window_height = 80  # Break image into 9 vertical layers since image height is 720
-    margin = 100  # How much to slide left and right for searching
-    window_centroids = find_window_centroids(thresholded, window_width, window_height, margin)
+            # Points used to draw all the left and right windows
+            points = [np.zeros_like(thresholded), np.zeros_like(thresholded)]
 
-    # If we found any window centers
-    if len(window_centroids) > 0:
+            lane_points = [np.zeros_like(thresholded), np.zeros_like(thresholded)]
 
-        # Points used to draw all the left and right windows
-        # l_points = np.zeros_like(warped)
-        # r_points = np.zeros_like(warped)
-        l_points = np.zeros_like(thresholded)
-        r_points = np.zeros_like(thresholded)
+            # Go through each level and draw the windows
+            for level in range(0, len(self.centroids)):
+                for side in Lines.Side:
+                    # Window_mask is a function to draw window areas
+                    # Add graphic points from window mask here to total pixels found
+                    if self.centroids[level][side] is not None:
+                        mask = window_mask(window_width, window_height, thresholded, self.centroids[level][side],
+                                           level)
+                        lane_points[side][(mask == 1) & (thresholded == 255)] = 255
+                        points[side][(points[side] == 255) | ((mask == 1))] = 255
+        point_coords, coefficients = [], []
+        for side in Lines.Side:
+            point_coords.append(np.where(lane_points[side] == 255))
+            if len(point_coords[side][0]) == 0:
+                coefficients.append(None)
+            else:
+                coefficients.append(np.polyfit(point_coords[side][0], point_coords[side][1], 2))
 
-        l_lane_points = np.zeros_like(thresholded)
-        r_lane_points = np.zeros_like(thresholded)
+        self.coefficients = coefficients
+        self.lane_points = lane_points
 
-        # Go through each level and draw the windows
-        for level in range(0, len(window_centroids)):
-            # Window_mask is a function to draw window areas
-            # Add graphic points from window mask here to total pixels found
-            if window_centroids[level][0] is not None:
-                l_mask = window_mask(window_width, window_height, thresholded, window_centroids[level][0], level)
-                l_lane_points[(l_mask == 1) & (thresholded == 255)] = 255
-                l_points[(l_points == 255) | ((l_mask == 1))] = 255
-            if window_centroids[level][1] is not None:
-                r_mask = window_mask(window_width, window_height, thresholded, window_centroids[level][1], level)
-                r_lane_points[(r_mask == 1) & (thresholded == 255)] = 255
-                r_points[(r_points == 255) | ((r_mask == 1))] = 255
+    def overlay_top_view(self, image):
+        """
+        Overlays the given image with a top view of masked pixels, sliding windows and detected lane lines and
+        returns the result
+        """
+        lr_lane_points = self.lane_points[Lines.Side.LEFT] + self.lane_points[Lines.Side.RIGHT]
+        color_lane_points = np.array(cv2.merge((lr_lane_points, lr_lane_points, lr_lane_points)), np.uint8)
 
-        # Draw the results
-        template = np.array(r_points + l_points, np.uint8)  # add both left and right window pixels together
-        zero_channel = np.zeros_like(template)  # create a zero color channel
-        template = np.array(cv2.merge((zero_channel, template, zero_channel)), np.uint8)  # make window pixels green
-        warpage = np.array(cv2.merge((thresholded, thresholded, thresholded)),
-                           np.uint8)  # making the original road pixels 3 color channels
-        output = cv2.addWeighted(warpage, 1, template, 0.5,
-                                 0.0)  # overlay the orignal road image with window results
+        ploty = np.linspace(0, color_lane_points.shape[0] - 1, color_lane_points.shape[0])
+        fit_points = []
+        for side in Lines.Side:
+            if self.coefficients[side] is None:
+                continue
+            fitx = self.coefficients[side][0] * ploty ** 2 + self.coefficients[side][1] * ploty + \
+                   self.coefficients[side][2]
+            fit_points.append(np.array((fitx, ploty), np.int32).T.reshape((-1, 1, 2)))
+            # fit_points[-1] = fit_points[-1].reshape((-1, 1, 2))
+            color_lane_points = cv2.polylines(color_lane_points,
+                                              [fit_points[-1]],
+                                              False,
+                                              (0, 0, 255),
+                                              thickness=3)
+        for i_row, row in enumerate(self.centroids):
+            for item in row:
+                if item is not None:
+                    color_lane_points = cv2.rectangle(color_lane_points,
+                                                      (int(item) - self.centroid_window_width // 2,
+                                                       self.centroid_window_height * (len(self.centroids) - i_row) - 1),
+                                                      (int(item) + self.centroid_window_width // 2,
+                                                       self.centroid_window_height * (
+                                                           len(self.centroids) - i_row - 1)),
+                                                      color=(0, 255, 0))  # Remember color is in (B,G,R)!
 
-    # If no window centers found, just display orginal road image
-    else:
-        output = np.array(cv2.merge((thresholded, thresholded, thresholded)), np.uint8)
-
-    l_point_coords = np.where(l_lane_points == 255)
-    r_point_coords = np.where(r_lane_points == 255)
-
-    l_fit = np.polyfit(l_point_coords[0], l_point_coords[1], 2)
-    r_fit = np.polyfit(r_point_coords[0], r_point_coords[1], 2)
-    # plt.imshow(r_lane_points+l_lane_points, cmap='gray')
-    return l_fit, r_fit, r_lane_points+l_lane_points
+        color_lane_points = cv2.addWeighted(image, .5, color_lane_points, .5, 0)
+        return color_lane_points
 
 
 def main():
@@ -450,70 +511,76 @@ def main():
     mtx, dist, rvecs, tvecs, roi = calibrate_camera()
 
     # Save an image with one calibration sample along with its undistorted version
-    save_undistorted_sample(calibration_dir + '/calibration2.jpg', mtx, dist, roi)
+    # save_undistorted_sample(calibration_dir + '/calibration2.jpg', mtx, dist, roi)
 
     #############################################################
-    # test_image = 'test_images/straight_lines2.jpg'
-    test_image = 'test_images/test1.jpg'
-    save_undistorted(test_image, mtx, dist, roi)
-
-    # Load a test image (for now)
-    img = cv2.imread(test_image)
-    assert img is not None
-
-    vidcap = cv2.VideoCapture('project_video.mp4')
-    fps = vidcap.get(cv2.CAP_PROP_FPS)
-    print('Source video is at',fps,'fps')
-    fourcc = cv2.VideoWriter_fourcc(*'XVID')
-    vidwrite = cv2.VideoWriter('out.mp4', fourcc=fourcc, fps=fps, frameSize=(1280, 720))
-
-    count = 0
-    start_time=time.time()
-    while(True):
-        read, frame = vidcap.read()
-        if not read:
-            break
-
+    if False:
+        test_image = 'test_images/zzz.png'
+        # test_image = 'test_images/straight_lines2.jpg'
+        img = cv2.imread(test_image)
+        assert img is not None
         # Un-distort it applying camera calibration
-        undistorted_img = undistort(frame, mtx, dist, roi)
+        undistorted_img = undistort(img, mtx, dist, roi)
 
-        # Determine the pespective transform transform
+        # Determine the perspective transform transform
         M = find_perspective_transform(undistorted_img)
 
         # Apply it to the source image
         warped = cv2.warpPerspective(undistorted_img, M, undistorted_img.shape[1::-1])
-
+        img = cv2.cvtColor(warped, cv2.COLOR_BGR2HSV)
+        plt.imshow(img)
+        plt.show()
         # params_browser(warped)
+        return
+
+    # input_fname = 'project_video.mp4'
+    input_fname = 'challenge_video.mp4'
+    output_fname = 'out_' + input_fname
+    vidcap = cv2.VideoCapture(input_fname)
+    fps = vidcap.get(cv2.CAP_PROP_FPS)
+    fourcc = cv2.VideoWriter_fourcc(*'XVID')
+    vidwrite = cv2.VideoWriter(output_fname, fourcc=fourcc, fps=fps, frameSize=(1280, 720))
+    print('Source video is at', fps, 'fps')
+
+    count_processes = 0
+    M = None  # Perspective transformation, will be determined later
+    lines = Lines()
+    start_time = time.time()
+    while (True):
+        read, frame = vidcap.read()
+        if not read:
+            break
+        print('Processing frame', count_processes + 1)
+        # Un-distort it applying camera calibration
+        undistorted_img = undistort(frame, mtx, dist, roi)
+
+        # Determine the pespective transform transformation
+        if M is None:
+            M = find_perspective_transform(undistorted_img)
+
+        # Apply it to the source image
+        warped = cv2.warpPerspective(undistorted_img, M, undistorted_img.shape[1::-1])
 
         # Threshold the warped image
         thresholded = threshold(warped)
 
         # Find the lane marking lines
-        l_fit, r_fit, lane_points = fit(thresholded)
+        lines.fit(thresholded)
+        overlay_img = lines.overlay_top_view(undistorted_img)
 
-        color_lane_points = np.array(cv2.merge((lane_points, lane_points, lane_points)), np.uint8)
+        vidwrite.write(overlay_img)
+        count_processes += 1
+        if count_processes % 200 == 0:
+            pass
 
-        ploty = np.linspace(0, thresholded.shape[0] - 1, thresholded.shape[0])
-        l_fitx = l_fit[0] * ploty ** 2 + l_fit[1] * ploty + l_fit[2]
-        r_fitx = r_fit[0] * ploty ** 2 + r_fit[1] * ploty + r_fit[2]
-        l_fit_points = np.array((l_fitx, ploty), np.int32).T
-        l_fit_points = l_fit_points.reshape((-1, 1, 2))
-        r_fit_points = np.array((r_fitx, ploty), np.int32).T
-        r_fit_points = r_fit_points.reshape((-1, 1, 2))
-        color_lane_points = cv2.polylines(color_lane_points, [r_fit_points, l_fit_points], False, (0, 0, 255))
-        color_lane_points = cv2.addWeighted(undistorted_img,.5 , color_lane_points, .5, 0)
-        vidwrite.write(color_lane_points)
-        count += 1
-        if count % 30 == 0:
-            print('.', end='', sep='', flush=True)
+    print('\nRate', count_processes / (time.time() - start_time), 'fps.')
 
-    print('\nRate',count/(time.time()-start_time),'fps.')
-
-
-    # Display the final results
-    # plt.imshow(output)
-    # plt.title('window fitting results')
-    # plt.show()
+    '''
+    TODO
+    Correct for camera rotation
+    Make thresholding work along all the "easy" video clip
+    Optimize thresholding
+    Photoshop calibration targets that fail and see if calibration accuracy improve'''
 
 
 if __name__ == '__main__':

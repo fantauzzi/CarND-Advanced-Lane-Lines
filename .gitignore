@@ -1,2 +1,3 @@
 output_images/*.png
-*out.mp4
+out*.mp4
+__pycache__
