@@ -355,6 +355,7 @@ def threshold(warped):
                     (grad_dir <= max_grad_dir)] = 255
     return thresholded
 
+from scipy.signal import gaussian
 
 class Lines:
     class Side(IntEnum):
@@ -368,22 +369,22 @@ class Lines:
         self.centroid_window_width = 100
         self.centroid_window_height = 80
         self.centroid_window_margin = 100
+        self.window= gaussian(self.centroid_window_width, std=self.centroid_window_width/2, sym= True)
 
     def find_window_centroids(self, thresholded, window_width, window_height, margin):
         min_acceptable = 1.
         window_centroids = []  # Store the (left,right) window centroid positions per level
-        window = np.ones(window_width)  # Create our window template that we will use for convolutions
+        # window = np.ones(window_width)  # Create our window template that we will use for convolutions
 
         # First find the two starting positions for the left and right lane by using np.sum to get the vertical image slice
         # and then np.convolve the vertical image slice with the window template
 
         # Sum quarter bottom of image to get slice, could use a different ratio
         l_sum = np.sum(thresholded[int(3 * thresholded.shape[0] / 4):, :int(thresholded.shape[1] / 2)], axis=0)
-        l_center = np.argmax(np.convolve(window, l_sum)) - window_width / 2
-        last_good_l_center = l_center
+        l_center = np.argmax(np.convolve(self.window, l_sum)) - window_width / 2
         r_sum = np.sum(thresholded[int(3 * thresholded.shape[0] / 4):, int(thresholded.shape[1] / 2):], axis=0)
-        r_center = np.argmax(np.convolve(window, r_sum)) - window_width / 2 + int(thresholded.shape[1] / 2)
-        last_good_r_center = r_center
+        r_center = np.argmax(np.convolve(self.window, r_sum)) - window_width / 2 + int(thresholded.shape[1] / 2)
+        last_good_center=[l_center, r_center]
 
         # Add what we found for the first layer
         window_centroids.append((l_center, r_center))
@@ -397,29 +398,22 @@ class Lines:
                     thresholded.shape[0] - level * window_height),
                 :],
                 axis=0)
-            conv_signal = np.convolve(window, image_layer)
+            conv_signal = np.convolve(self.window, image_layer)
             # Find the best left centroid by using past left center as a reference
             # Use window_width/2 as offset because convolution signal reference is at right side of window, not center of window
-            offset = window_width / 2
-            l_min_index = int(max(last_good_l_center + offset - margin, 0))
-            l_max_index = int(min(last_good_l_center + offset + margin, thresholded.shape[1]))
-            goodness = np.max(conv_signal[l_min_index:l_max_index])
-            if goodness >= min_acceptable:
-                l_center = np.argmax(conv_signal[l_min_index:l_max_index]) + l_min_index - offset
-                last_good_l_center = l_center
-            else:
-                l_center = None
-            # Find the best right centroid by using past right center as a reference
-            r_min_index = int(max(last_good_r_center + offset - margin, 0))
-            r_max_index = int(min(last_good_r_center + offset + margin, thresholded.shape[1]))
-            goodness = np.max(conv_signal[r_min_index:r_max_index])
-            if goodness >= min_acceptable:
-                r_center = np.argmax(conv_signal[r_min_index:r_max_index]) + r_min_index - offset
-                last_good_r_center = r_center
-            else:
-                r_center = None
+            center= [None]*len(Lines.Side)
+            for side in Lines.Side:
+                offset = window_width / 2
+                min_index = int(max(last_good_center[side] + offset - margin, 0))
+                max_index = int(min(last_good_center[side] + offset + margin, thresholded.shape[1]))
+                goodness = np.max(conv_signal[min_index:max_index])
+                if goodness >= min_acceptable:
+                    center[side] = np.argmax(conv_signal[min_index:max_index]) + min_index - offset
+                    last_good_center[side] = center[side]
+                else:
+                    center[side] = None
             # Add what we found for that layer
-            window_centroids.append((l_center, r_center))
+            window_centroids.append(tuple(center))
 
         return window_centroids
 
@@ -437,31 +431,23 @@ class Lines:
         # A list of pairs, each pair is the x coordinates for a left and right centroid
         self.centroids = self.find_window_centroids(thresholded, window_width, window_height, margin)
 
-        # If we found any window centers
-        if len(self.centroids) > 0:
+        # Points used to draw all the left and right windows
+        lane_points = [np.zeros_like(thresholded), np.zeros_like(thresholded)]
 
-            # Points used to draw all the left and right windows
-            points = [np.zeros_like(thresholded), np.zeros_like(thresholded)]
-
-            lane_points = [np.zeros_like(thresholded), np.zeros_like(thresholded)]
-
-            # Go through each level and draw the windows
-            for level in range(0, len(self.centroids)):
-                for side in Lines.Side:
-                    # Window_mask is a function to draw window areas
-                    # Add graphic points from window mask here to total pixels found
-                    if self.centroids[level][side] is not None:
-                        mask = window_mask(window_width, window_height, thresholded, self.centroids[level][side],
-                                           level)
-                        lane_points[side][(mask == 1) & (thresholded == 255)] = 255
-                        points[side][(points[side] == 255) | ((mask == 1))] = 255
-        point_coords, coefficients = [], []
+        # Go through each level and draw the windows
+        for level in range(0, len(self.centroids)):
+            for side in Lines.Side:
+                # Window_mask is a function to draw window areas
+                # Add graphic points from window mask here to total pixels found
+                if self.centroids[level][side] is not None:
+                    mask = window_mask(window_width, window_height, thresholded, self.centroids[level][side],
+                                       level)
+                    lane_points[side][(mask == 1) & (thresholded == 255)] = 255
+        point_coords, coefficients = [None] * len(Lines.Side), [None] * len(Lines.Side)
         for side in Lines.Side:
-            point_coords.append(np.where(lane_points[side] == 255))
-            if len(point_coords[side][0]) == 0:
-                coefficients.append(None)
-            else:
-                coefficients.append(np.polyfit(point_coords[side][0], point_coords[side][1], 2))
+            point_coords[side] = np.where(lane_points[side] == 255)
+            coefficients[side] = np.polyfit(point_coords[side][0], point_coords[side][1], 2)\
+                if len(point_coords[side][0]) > 0 else None
 
         self.coefficients = coefficients
         self.lane_points = lane_points
@@ -534,10 +520,11 @@ def main():
         return
 
     # input_fname = 'project_video.mp4'
-    input_fname = 'challenge_video.mp4'
+    input_fname = 'harder_challenge_video.mp4'
     output_fname = 'out_' + input_fname
     vidcap = cv2.VideoCapture(input_fname)
     fps = vidcap.get(cv2.CAP_PROP_FPS)
+    assert fps > 0
     fourcc = cv2.VideoWriter_fourcc(*'XVID')
     vidwrite = cv2.VideoWriter(output_fname, fourcc=fourcc, fps=fps, frameSize=(1280, 720))
     print('Source video is at', fps, 'fps')
@@ -570,17 +557,16 @@ def main():
 
         vidwrite.write(overlay_img)
         count_processes += 1
-        if count_processes % 200 == 0:
+        if count_processes % 100 == 0:
             pass
 
     print('\nRate', count_processes / (time.time() - start_time), 'fps.')
 
     '''
     TODO
+    ====> Optimize thresholding <====
     Correct for camera rotation
-    Make thresholding work along all the "easy" video clip
-    Optimize thresholding
-    Photoshop calibration targets that fail and see if calibration accuracy improve'''
+    Photoshop calibration targets that fail and see if calibration accuracy improves'''
 
 
 if __name__ == '__main__':
