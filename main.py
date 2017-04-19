@@ -367,61 +367,87 @@ class Lines:
     def __init__(self):
         self.coefficients = [None, None]
         self.lane_points = [None, None]
-        self.centroids = None
         self.centroid_window_width = 100
         self.centroid_window_height = 80
         self.centroid_window_margin = 100
-        self.window = gaussian(self.centroid_window_width, std=self.centroid_window_width / 2, sym=True)
+        n_rows = 720 // self.centroid_window_height # TODO fix this hard-wiring
+        assert 720 % n_rows == 0
+        self.centroids = [[None]*len(Lines.Side) for _ in range(n_rows)]
+        self.filter = gaussian(self.centroid_window_width, std=self.centroid_window_width / 2, sym=True)
+        self.default_center_x=[None, None]
 
     def find_window_centroids(self, thresholded, window_width, window_height, margin):
+        # Result of convolution below this threshold will have the corresponding sliding window ignored, any thresholded point in it will not enter lane line interpolation
         min_acceptable = 1.
         new_centroids = []  # Store the (left,right) window centroid positions per level
 
-        if self.centroids is None or self.centroids[0][0] is None or self.centroids[0][1] is None:
-            print('Recentering')
-            # First find the two starting positions for the left and right lane by using np.sum to get the vertical image slice
-            # and then np.convolve the vertical image slice with the window template
-
-            # Sum quarter bottom of image to get slice, could use a different ratio
-            starting_layer = 1
-            l_sum = np.sum(thresholded[int(3 * thresholded.shape[0] / 4):, :int(thresholded.shape[1] / 2)], axis=0)
-            l_center = np.argmax(np.convolve(self.window, l_sum)) - window_width / 2
-            r_sum = np.sum(thresholded[int(3 * thresholded.shape[0] / 4):, int(thresholded.shape[1] / 2):], axis=0)
-            r_center = np.argmax(np.convolve(self.window, r_sum)) - window_width / 2 + int(thresholded.shape[1] / 2)
-            last_good_center = [l_center, r_center]
-
-            # Add what we found for the first layer
-            new_centroids.append((l_center, r_center))
-        else:
-            starting_layer = 0
-            last_good_center = list(self.centroids[0])
-            assert last_good_center[0] is not None and last_good_center[1] is not None
-
-        # Go through each layer looking for max pixel locations
-        for level in range(starting_layer, (int)(thresholded.shape[0] / window_height)):
-            # convolve the window into the vertical slice of the image
+        ''' Partition the image in horizontal bands of height self.height, numbered starting from 0, where band 0
+        is at the bottom of the image (closest to the camera) '''
+        for band in range(0, (int)(thresholded.shape[0] / window_height)):
+            # convolve the band with a pre-computed filter, stored in self.filter to detect lane line markers
             image_layer = np.sum(
                 thresholded[
-                int(thresholded.shape[0] - (level + 1) * window_height):int(
-                    thresholded.shape[0] - level * window_height),
+                int(thresholded.shape[0] - (band + 1) * window_height):int(
+                    thresholded.shape[0] - band * window_height),
                 :],
                 axis=0)
-            conv_signal = np.convolve(self.window, image_layer)
-            # Find the best left centroid by using past left center as a reference
-            # Use window_width/2 as offset because convolution signal reference is at right side of window, not center of window
+            conv_signal = np.convolve(self.filter, image_layer)
+
+            ''' One side at a time, find the centroid for the current band, and store its x cordinate in `center`.
+            First determine the x coordinate of a window in the current band where to look for the centroid;
+            x coordinate is for the centre of the window, and will be stored in starting_x '''
             center = [None] * len(Lines.Side)
             for side in Lines.Side:
+                ''' If at the bottom band, and no previous centroid is known for the given side, then find a good x
+                coordinate from where to start serching, and store it in self.default_center_x[side] '''
+                if band == 0 and self.centroids[0][side] is None:
+                    print('Recentering side', side)
+                    if side == Lines.Side.LEFT:
+                        area_sum = np.sum(thresholded[int(3 * thresholded.shape[0] / 4):, :int(thresholded.shape[1] / 2)],
+                                          axis=0)
+                        self.default_center_x[side] = np.argmax(np.convolve(self.filter, area_sum)) - window_width / 2
+                    else:
+                        area_sum = np.sum(thresholded[int(3 * thresholded.shape[0] / 4):, int(thresholded.shape[1] / 2):],
+                                          axis=0)
+                        self.default_center_x[side] = np.argmax(np.convolve(self.filter, area_sum)) - window_width / 2 + int(
+                            thresholded.shape[1] / 2)
+                # If at the bottom band and a default x is know for the window, then use it
+                if band == 0:
+                    starting_x = self.default_center_x[side]
+                else:
+                    ''' If at any band different from the bottom, as the wanted `starting_x` adopt the centroid calculated
+                     at the previous frame, if any was determined successfully; otherwise look at the band below, and use
+                     its centroid for the current frame, if determined successfully; otherwise use its centroid from the
+                     previous frame; if that is unavailable too, then go to the next band. If no suitable centroid is found
+                     down to band 0, then default to self.default_center_x[side].
+                     '''
+                    if self.centroids[band][side] is not None:
+                        starting_x = self.centroids[band][side]
+                    else:
+                        for prev_level in range(band-1, -1, -1):
+                            if new_centroids[prev_level][side] is not None:
+                                starting_x = new_centroids[prev_level][side]
+                                break
+                            elif self.centroids[prev_level][side] is not None:
+                                starting_x = self.centroids[prev_level][side]
+                                break
+                        else:
+                            assert self.default_center_x[side] is not None
+                            starting_x = self.default_center_x[side]
+                ''' Do the convolution in the window centred around starting_x, and find the x that maximises the
+                convolution result; that will be the centroid '''
                 offset = window_width / 2
-                min_index = int(max(last_good_center[side] + offset - margin, 0))
-                max_index = int(min(last_good_center[side] + offset + margin, thresholded.shape[1]))
+                min_index = int(max(starting_x + offset - margin, 0))
+                max_index = int(min(starting_x + offset + margin, thresholded.shape[1]))
                 goodness = np.max(conv_signal[min_index:max_index])
                 if goodness >= min_acceptable:
                     center[side] = np.argmax(conv_signal[min_index:max_index]) + min_index - offset
-                    last_good_center[side] = center[side]
-                else:
+                    if band == 0:  # If at the bottom band, set default_center_x[side] to the found centroid
+                        self.default_center_x[side] = center[side]
+                else:  # If the convolution result is not good enough, give up and set the centroid to None
                     center[side] = None
-            # Add what we found for that layer
-            new_centroids.append(tuple(center))
+            # Update the list of centroids with what just found for the current band
+            new_centroids.append(center)
         self.centroids = new_centroids
         return new_centroids
 
