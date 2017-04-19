@@ -355,7 +355,9 @@ def threshold(warped):
                     (grad_dir <= max_grad_dir)] = 255
     return thresholded
 
+
 from scipy.signal import gaussian
+
 
 class Lines:
     class Side(IntEnum):
@@ -369,28 +371,34 @@ class Lines:
         self.centroid_window_width = 100
         self.centroid_window_height = 80
         self.centroid_window_margin = 100
-        self.window= gaussian(self.centroid_window_width, std=self.centroid_window_width/2, sym= True)
+        self.window = gaussian(self.centroid_window_width, std=self.centroid_window_width / 2, sym=True)
 
     def find_window_centroids(self, thresholded, window_width, window_height, margin):
         min_acceptable = 1.
-        window_centroids = []  # Store the (left,right) window centroid positions per level
-        # window = np.ones(window_width)  # Create our window template that we will use for convolutions
+        new_centroids = []  # Store the (left,right) window centroid positions per level
 
-        # First find the two starting positions for the left and right lane by using np.sum to get the vertical image slice
-        # and then np.convolve the vertical image slice with the window template
+        if self.centroids is None or self.centroids[0][0] is None or self.centroids[0][1] is None:
+            print('Recentering')
+            # First find the two starting positions for the left and right lane by using np.sum to get the vertical image slice
+            # and then np.convolve the vertical image slice with the window template
 
-        # Sum quarter bottom of image to get slice, could use a different ratio
-        l_sum = np.sum(thresholded[int(3 * thresholded.shape[0] / 4):, :int(thresholded.shape[1] / 2)], axis=0)
-        l_center = np.argmax(np.convolve(self.window, l_sum)) - window_width / 2
-        r_sum = np.sum(thresholded[int(3 * thresholded.shape[0] / 4):, int(thresholded.shape[1] / 2):], axis=0)
-        r_center = np.argmax(np.convolve(self.window, r_sum)) - window_width / 2 + int(thresholded.shape[1] / 2)
-        last_good_center=[l_center, r_center]
+            # Sum quarter bottom of image to get slice, could use a different ratio
+            starting_layer = 1
+            l_sum = np.sum(thresholded[int(3 * thresholded.shape[0] / 4):, :int(thresholded.shape[1] / 2)], axis=0)
+            l_center = np.argmax(np.convolve(self.window, l_sum)) - window_width / 2
+            r_sum = np.sum(thresholded[int(3 * thresholded.shape[0] / 4):, int(thresholded.shape[1] / 2):], axis=0)
+            r_center = np.argmax(np.convolve(self.window, r_sum)) - window_width / 2 + int(thresholded.shape[1] / 2)
+            last_good_center = [l_center, r_center]
 
-        # Add what we found for the first layer
-        window_centroids.append((l_center, r_center))
+            # Add what we found for the first layer
+            new_centroids.append((l_center, r_center))
+        else:
+            starting_layer = 0
+            last_good_center = list(self.centroids[0])
+            assert last_good_center[0] is not None and last_good_center[1] is not None
 
         # Go through each layer looking for max pixel locations
-        for level in range(1, (int)(thresholded.shape[0] / window_height)):
+        for level in range(starting_layer, (int)(thresholded.shape[0] / window_height)):
             # convolve the window into the vertical slice of the image
             image_layer = np.sum(
                 thresholded[
@@ -401,7 +409,7 @@ class Lines:
             conv_signal = np.convolve(self.window, image_layer)
             # Find the best left centroid by using past left center as a reference
             # Use window_width/2 as offset because convolution signal reference is at right side of window, not center of window
-            center= [None]*len(Lines.Side)
+            center = [None] * len(Lines.Side)
             for side in Lines.Side:
                 offset = window_width / 2
                 min_index = int(max(last_good_center[side] + offset - margin, 0))
@@ -413,9 +421,9 @@ class Lines:
                 else:
                     center[side] = None
             # Add what we found for that layer
-            window_centroids.append(tuple(center))
-
-        return window_centroids
+            new_centroids.append(tuple(center))
+        self.centroids = new_centroids
+        return new_centroids
 
     def fit(self, thresholded):
         """
@@ -429,7 +437,7 @@ class Lines:
         assert thresholded.shape[0] % window_height == 0
         margin = self.centroid_window_margin  # How much to slide left and right for searching
         # A list of pairs, each pair is the x coordinates for a left and right centroid
-        self.centroids = self.find_window_centroids(thresholded, window_width, window_height, margin)
+        self.find_window_centroids(thresholded, window_width, window_height, margin)
 
         # Points used to draw all the left and right windows
         lane_points = [np.zeros_like(thresholded), np.zeros_like(thresholded)]
@@ -446,7 +454,7 @@ class Lines:
         point_coords, coefficients = [None] * len(Lines.Side), [None] * len(Lines.Side)
         for side in Lines.Side:
             point_coords[side] = np.where(lane_points[side] == 255)
-            coefficients[side] = np.polyfit(point_coords[side][0], point_coords[side][1], 2)\
+            coefficients[side] = np.polyfit(point_coords[side][0], point_coords[side][1], 2) \
                 if len(point_coords[side][0]) > 0 else None
 
         self.coefficients = coefficients
@@ -499,7 +507,6 @@ def main():
     # Save an image with one calibration sample along with its undistorted version
     # save_undistorted_sample(calibration_dir + '/calibration2.jpg', mtx, dist, roi)
 
-    #############################################################
     if False:
         test_image = 'test_images/zzz.png'
         # test_image = 'test_images/straight_lines2.jpg'
@@ -519,8 +526,9 @@ def main():
         # params_browser(warped)
         return
 
-    # input_fname = 'project_video.mp4'
-    input_fname = 'harder_challenge_video.mp4'
+    #############################################################
+    input_fname = 'project_video.mp4'
+    # input_fname = 'harder_challenge_video.mp4'
     output_fname = 'out_' + input_fname
     vidcap = cv2.VideoCapture(input_fname)
     fps = vidcap.get(cv2.CAP_PROP_FPS)
