@@ -413,6 +413,8 @@ class Lanes:
         self.curve_rad = [None] * len(Lanes.Side)
         self.x0 = [None] * len(Lanes.Side)
         self.y0 = [None] * len(Lanes.Side)
+        self.ploty = None
+        self.fitx= [None] * len(Lanes.Side)
 
     def find_window_centroids(self, thresholded, window_width, window_height, margin):
         # Result of convolution below this threshold will have the corresponding sliding window ignored, any thresholded point in it will not enter lane line interpolation
@@ -559,6 +561,7 @@ class Lanes:
             np.uint8)
 
         ploty = np.linspace(0, color_lane_points.shape[0] - 1, color_lane_points.shape[0])
+        self.ploty=ploty
         fit_points = []
         for side in Lanes.Side:
             if self.coefficients[side] is None:
@@ -566,6 +569,7 @@ class Lanes:
             fitx = self.coefficients[side][0] * ploty ** 2 + self.coefficients[side][1] * ploty + \
                    self.coefficients[side][2]
             fit_points.append(np.array((fitx, ploty), np.int32).T.reshape((-1, 1, 2)))
+            self.fitx[side] = fitx
             # fit_points[-1] = fit_points[-1].reshape((-1, 1, 2))
             color_lane_points = cv2.polylines(color_lane_points,
                                               [fit_points[-1]],
@@ -592,6 +596,30 @@ class Lanes:
         cv2.putText(color_lane_points, to_print, (0, 50), font, 1, (255, 255, 255), 2, cv2.LINE_AA)
         return color_lane_points
 
+    def overlay_lanes(self, image, M):
+        # Create an image to draw the lines on
+        color_warp = np.zeros_like(image).astype(np.uint8)
+        # color_warp = np.dstack((warp_zero, warp_zero, warp_zero))
+
+
+        # Recast the x and y points into usable format for cv2.fillPoly()
+        pts_left = np.array([np.transpose(np.vstack([self.fitx[0], self.ploty]))])
+        pts_right = np.array([np.flipud(np.transpose(np.vstack([self.fitx[1], self.ploty])))])
+        pts = np.hstack((pts_left, pts_right))
+
+        # TODO make this more readable
+        # Draw the lane onto the warped blank image
+        pts = np.squeeze(pts)
+        pts = np.expand_dims(pts, 1)
+
+        # cv2.polylines(color_warp, np.int_([pts]), True, (0, 255, 255))
+        cv2.fillPoly(color_warp, np.int_([pts]), (0, 255, 0))
+
+        # Warp the blank back to original image space using inverse perspective matrix (Minv)
+        newwarp = cv2.warpPerspective(color_warp, M, (color_warp.shape[1], color_warp.shape[0]), flags=cv2.WARP_INVERSE_MAP)
+        # Combine the result with the original image
+        result = cv2.addWeighted(image, 1, newwarp, 0.3, 0)
+        return result
 
 def main():
     if not os.path.exists(output_dir):
@@ -657,9 +685,14 @@ def main():
 
         # Find the lane marking lines
         lines.fit(thresholded)
+        # Overlay bird-eye view information on the image
         overlay_img = lines.overlay_top_view(undistorted_img)
+        # Fetch an image with marked lanes on overlay
+        img_with_lanes = lines.overlay_lanes(overlay_img, M)
 
-        vidwrite.write(overlay_img)
+
+
+        vidwrite.write(img_with_lanes)
         count_processes += 1
         if count_processes % 100 == 0:
             pass
@@ -668,9 +701,11 @@ def main():
 
     '''
     TODO
-    Draw un-warped lane
-    Implement sanity checks
+    
+    Clean-up code for drawing overlays
+    Implement sanity checks to improve first tough section of first video
     Try with x gradient alone, instead of direction and magnitude
+    Go for the second video
     Correct for camera rotation
     Photoshop calibration targets that fail and see if calibration accuracy improves'''
 
