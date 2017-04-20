@@ -7,6 +7,7 @@ import math
 import time
 import matplotlib.gridspec as gridspec
 from matplotlib.widgets import Slider, RadioButtons
+from scipy.signal import gaussian
 from enum import IntEnum
 
 # Directory containing images for caliration
@@ -356,29 +357,66 @@ def threshold(warped):
     return thresholded
 
 
-from scipy.signal import gaussian
+def measure_curve_rad(y, x):
+    ym_per_pix = 3.48 / 93  # meters per pixel in y dimension
+    xm_per_pix = 3.66 / 748  # meters per pixel in x dimension
+
+    # Fit new polynomials to x,y in world space
+    coefficients_cr = np.polyfit(y * ym_per_pix, x * xm_per_pix, 2)
+    # Calculate the new radii of curvature
+    y0 = np.max(y)
+    curve_rad = (
+                    (1 + (
+                        2 * coefficients_cr[0] * np.max(y) * ym_per_pix + coefficients_cr[1]) ** 2) ** 1.5) / (
+                2 * coefficients_cr[0])
+
+    x0= coefficients_cr[0]*(y0**2)+coefficients_cr[1]*y0+coefficients_cr[2]
+
+    m = -2*coefficients_cr[0]
+    x1= x0+m*((1+m**2)**.5)/curve_rad
+    y1= y0+curve_rad/((1+m**2)**.5)
+
+    return x1, y1, curve_rad
 
 
-class Lines:
+def measure_curve_rad2(coefficients, y):
+    ym_per_pix = 3.48 / 93  # meters per pixel in y dimension
+    xm_per_pix = 3.66 / 748  # meters per pixel in x dimension
+
+    # Calculate the new radii of curvature
+    curve_rad = (
+                    (1 + (
+                        2 * coefficients[0] * y * ym_per_pix + coefficients[1]) ** 2) ** 1.5) / (
+                2 * coefficients[0])
+
+    return curve_rad
+
+
+class Lanes:
     class Side(IntEnum):
         LEFT = 0
         RIGHT = 1
 
     def __init__(self):
-        self.coefficients = [None, None]
-        self.lane_points = [None, None]
+        self.coefficients = [None] * len(Lanes.Side)
+        self.smoothing_coefficients = [None] * len(Lanes.Side)
+        self.lane_points = [None] * len(Lanes.Side)
         self.centroid_window_width = 100
         self.centroid_window_height = 80
-        self.centroid_window_margin = 100
-        n_rows = 720 // self.centroid_window_height # TODO fix this hard-wiring
+        self.centroid_window_margin = 50  # Tune carefully!
+        n_rows = 720 // self.centroid_window_height  # TODO fix this hard-wiring
         assert 720 % n_rows == 0
-        self.centroids = [[None]*len(Lines.Side) for _ in range(n_rows)]
+        self.centroids = [[None] * len(Lanes.Side) for _ in range(n_rows)]
         self.filter = gaussian(self.centroid_window_width, std=self.centroid_window_width / 2, sym=True)
-        self.default_center_x=[None, None]
+        self.default_center_x = [None] * len(Lanes.Side)
+        self.thresholded = None
+        self.curve_rad = [None] * len(Lanes.Side)
+        self.x0 = [None] * len(Lanes.Side)
+        self.y0 = [None] * len(Lanes.Side)
 
     def find_window_centroids(self, thresholded, window_width, window_height, margin):
         # Result of convolution below this threshold will have the corresponding sliding window ignored, any thresholded point in it will not enter lane line interpolation
-        min_acceptable = 1.
+        min_acceptable = 100.
         new_centroids = []  # Store the (left,right) window centroid positions per level
 
         ''' Partition the image in horizontal bands of height self.height, numbered starting from 0, where band 0
@@ -396,20 +434,23 @@ class Lines:
             ''' One side at a time, find the centroid for the current band, and store its x cordinate in `center`.
             First determine the x coordinate of a window in the current band where to look for the centroid;
             x coordinate is for the centre of the window, and will be stored in starting_x '''
-            center = [None] * len(Lines.Side)
-            for side in Lines.Side:
+            center = [None] * len(Lanes.Side)
+            for side in Lanes.Side:
                 ''' If at the bottom band, and no previous centroid is known for the given side, then find a good x
                 coordinate from where to start serching, and store it in self.default_center_x[side] '''
                 if band == 0 and self.centroids[0][side] is None:
                     print('Recentering side', side)
-                    if side == Lines.Side.LEFT:
-                        area_sum = np.sum(thresholded[int(3 * thresholded.shape[0] / 4):, :int(thresholded.shape[1] / 2)],
-                                          axis=0)
+                    if side == Lanes.Side.LEFT:
+                        area_sum = np.sum(
+                            thresholded[int(3 * thresholded.shape[0] / 4):, :int(thresholded.shape[1] / 2)],
+                            axis=0)
                         self.default_center_x[side] = np.argmax(np.convolve(self.filter, area_sum)) - window_width / 2
                     else:
-                        area_sum = np.sum(thresholded[int(3 * thresholded.shape[0] / 4):, int(thresholded.shape[1] / 2):],
-                                          axis=0)
-                        self.default_center_x[side] = np.argmax(np.convolve(self.filter, area_sum)) - window_width / 2 + int(
+                        area_sum = np.sum(
+                            thresholded[int(3 * thresholded.shape[0] / 4):, int(thresholded.shape[1] / 2):],
+                            axis=0)
+                        self.default_center_x[side] = np.argmax(
+                            np.convolve(self.filter, area_sum)) - window_width / 2 + int(
                             thresholded.shape[1] / 2)
                 # If at the bottom band and a default x is know for the window, then use it
                 if band == 0:
@@ -424,7 +465,7 @@ class Lines:
                     if self.centroids[band][side] is not None:
                         starting_x = self.centroids[band][side]
                     else:
-                        for prev_level in range(band-1, -1, -1):
+                        for prev_level in range(band - 1, -1, -1):
                             if new_centroids[prev_level][side] is not None:
                                 starting_x = new_centroids[prev_level][side]
                                 break
@@ -458,6 +499,10 @@ class Lines:
         for the two lines, and self.lane_points holds two lists of point coordinates, that belong to the respective lane
         lines.
         """
+
+        ''' Number in interval [0, 1), governs the smoothing of interpolated lane lines; closer to 1 is smoother, closer
+        to 0 is jerkier; if set to 0, there is no interpolation. '''
+        smoothing = .6
         window_width = self.centroid_window_width
         window_height = self.centroid_window_height  # Break image into 9 vertical layers since image height is 720
         assert thresholded.shape[0] % window_height == 0
@@ -470,33 +515,52 @@ class Lines:
 
         # Go through each level and draw the windows
         for level in range(0, len(self.centroids)):
-            for side in Lines.Side:
+            for side in Lanes.Side:
                 # Window_mask is a function to draw window areas
                 # Add graphic points from window mask here to total pixels found
                 if self.centroids[level][side] is not None:
                     mask = window_mask(window_width, window_height, thresholded, self.centroids[level][side],
                                        level)
                     lane_points[side][(mask == 1) & (thresholded == 255)] = 255
-        point_coords, coefficients = [None] * len(Lines.Side), [None] * len(Lines.Side)
-        for side in Lines.Side:
+        point_coords = [None] * len(Lanes.Side)
+        for side in Lanes.Side:
             point_coords[side] = np.where(lane_points[side] == 255)
-            coefficients[side] = np.polyfit(point_coords[side][0], point_coords[side][1], 2) \
-                if len(point_coords[side][0]) > 0 else None
+            if len(point_coords[side][0]) > 0:
+                current_coefficients = np.polyfit(point_coords[side][0], point_coords[side][1], 2)
+                if self.smoothing_coefficients[side] is None:
+                    self.smoothing_coefficients[side] = current_coefficients
+                    self.coefficients[side] = current_coefficients
+                else:
+                    self.coefficients[side] = (1 - smoothing) * current_coefficients + smoothing * \
+                                                                                       self.smoothing_coefficients[side]
+                    self.smoothing_coefficients[side] = self.coefficients[side]
+                self.x0[side], self.y0[side], self.curve_rad[side] = measure_curve_rad(point_coords[side][0], point_coords[side][1])
+                # self.curve_rad[side] = measure_curve_rad2(self.coefficients[side], np.max(point_coords[side][0]))
+                # Now our radius of curvature is in meters
+            else:
+                self.coefficients[side] = None
+                self.smoothing_coefficients[side] = None
+                self.curve_rad[side] = None
 
-        self.coefficients = coefficients
         self.lane_points = lane_points
+        self.thresholded = thresholded  # Store the thresholded bitmap so it can be used for visualisation
 
     def overlay_top_view(self, image):
         """
-        Overlays the given image with a top view of masked pixels, sliding windows and detected lane lines and
-        returns the result
+        Overlays the given image with a top view of thresholded and masked pixels, sliding windows and detected lane
+        lines and returns the result.
         """
-        lr_lane_points = self.lane_points[Lines.Side.LEFT] + self.lane_points[Lines.Side.RIGHT]
-        color_lane_points = np.array(cv2.merge((lr_lane_points, lr_lane_points, lr_lane_points)), np.uint8)
+
+        ''' Thresholded pixels belonging to the right lane line are cyan, to the left lane line are magenta, not
+        belonging to any line are blue; sliding windows are outlilned in green and detected lanes are red '''
+
+        color_lane_points = np.array(
+            cv2.merge((self.thresholded, self.lane_points[Lanes.Side.RIGHT], self.lane_points[Lanes.Side.LEFT])),
+            np.uint8)
 
         ploty = np.linspace(0, color_lane_points.shape[0] - 1, color_lane_points.shape[0])
         fit_points = []
-        for side in Lines.Side:
+        for side in Lanes.Side:
             if self.coefficients[side] is None:
                 continue
             fitx = self.coefficients[side][0] * ploty ** 2 + self.coefficients[side][1] * ploty + \
@@ -520,6 +584,12 @@ class Lines:
                                                       color=(0, 255, 0))  # Remember color is in (B,G,R)!
 
         color_lane_points = cv2.addWeighted(image, .5, color_lane_points, .5, 0)
+
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        sanity = ((self.x0[0]-self.x0[1])**2 +(self.y0[0]-self.y0[1])**2)**.5
+        to_print = 'Radius left={:.0f}m right={:.0f}m sanity={:.1f}'.format(self.curve_rad[0], self.curve_rad[1],
+                                                                              sanity)
+        cv2.putText(color_lane_points, to_print, (0, 50), font, 1, (255, 255, 255), 2, cv2.LINE_AA)
         return color_lane_points
 
 
@@ -565,7 +635,7 @@ def main():
 
     count_processes = 0
     M = None  # Perspective transformation, will be determined later
-    lines = Lines()
+    lines = Lanes()
     start_time = time.time()
     while (True):
         read, frame = vidcap.read()
@@ -598,7 +668,9 @@ def main():
 
     '''
     TODO
-    ====> Optimize thresholding <====
+    Draw un-warped lane
+    Implement sanity checks
+    Try with x gradient alone, instead of direction and magnitude
     Correct for camera rotation
     Photoshop calibration targets that fail and see if calibration accuracy improves'''
 
