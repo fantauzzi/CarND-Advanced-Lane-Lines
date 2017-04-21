@@ -226,6 +226,17 @@ def find_gradient(gscale_img):
     grad_dir = np.abs(np.arctan2(sobel_y, sobel_x))
     return grad_size, grad_dir
 
+def find_x_gradient(gscale_img):
+    """
+    Returns the absolute value of the x-gradient for the given grayscale image, scaled to be in the range of integers 
+    [0, 255].
+    """
+    sobel_x = cv2.Sobel(gscale_img, cv2.CV_64F, 1, 0, ksize=5)
+    sobel_x = np.abs(sobel_x)
+    max_grad_x = np.max(sobel_x)
+    sobel_x = np.uint8(sobel_x/ max_grad_x * 255)
+    return sobel_x
+
 
 def params_browser(image):
     """
@@ -332,7 +343,7 @@ def window_mask(width, height, img_ref, center, level):
     return output
 
 
-def threshold(warped):
+def threshold2(warped):
     masks = (((0, 100, 100), (50, 255, 255)),
              ((18, 0, 180), (255, 80, 255)),
              ((4, 0, 180), (15, 80, 255)))
@@ -354,6 +365,29 @@ def threshold(warped):
                     (mask[MAX][V] >= hsv[:, :, V]) &
                     (grad_size >= min_grad_size) &
                     (grad_dir <= max_grad_dir)] = 255
+    return thresholded
+
+
+def threshold(warped):
+    # TODO optimise the masks
+    masks = (((0, 100, 100), (50, 255, 255)),
+             ((18, 0, 180), (255, 80, 255)),
+             ((4, 0, 180), (15, 80, 255)))
+    min_grad_size = 15
+    hsv = cv2.cvtColor(warped, cv2.COLOR_BGR2HSV)
+    thresholded = np.zeros_like(hsv[:, :, 0])
+    MIN, MAX = 0, 1
+    H, S, V = 0, 1, 2
+    grad_size = find_x_gradient(hsv[:, :, 2])
+    for mask in masks:
+        thresholded[(mask[MIN][H] <= hsv[:, :, H]) &
+                    (mask[MAX][H] >= hsv[:, :, H]) &
+                    (mask[MIN][S] <= hsv[:, :, S]) &
+                    (mask[MAX][S] >= hsv[:, :, S]) &
+                    (mask[MIN][V] <= hsv[:, :, V]) &
+                    (mask[MAX][V] >= hsv[:, :, V]) &
+                    (grad_size >= min_grad_size)]=255
+
     return thresholded
 
 
@@ -402,6 +436,7 @@ class Lanes:
         self.y0 = [None] * len(Lanes.Side)
         self.ploty = np.linspace(0, vertical_resolution - 1, vertical_resolution)
         self.fitx = [None] * len(Lanes.Side)
+        self.is_good = [False] * len(Lanes.Side)
 
     def find_window_centroids(self, thresholded, window_width, window_height, margin):
         # Result of convolution below this threshold will have the corresponding sliding window ignored, any thresholded point in it will not enter lane line interpolation
@@ -489,9 +524,23 @@ class Lanes:
         lines.
         """
 
+        def is_sound(x0, y0, curve_rad):
+            ''' Assesses the goodness of the last lane detection and interpolation, returns True if it is good for both
+            lane line markers, False otherwise.'''
+            if None in x0 or None in y0 or None in curve_rad:
+                return True
+            curv_center_dist = ((x0[0] - x0[1]) ** 2 + (y0[0] - y0[1]) ** 2) ** .5
+            if curv_center_dist > 50000 and (abs(curve_rad[0]) < 800 or abs(curve_rad[1]) < 800):
+                return False
+            if curv_center_dist > 200000:
+                return False
+            if (abs(curve_rad[0]) < 800 or abs(curve_rad[1]) < 800) and curve_rad[0] / curve_rad[1] < 0:
+                return False
+            return True
+
         ''' Number in interval [0, 1), governs the smoothing of interpolated lane lines; closer to 1 is smoother, closer
         to 0 is jerkier; if set to 0, there is no interpolation. '''
-        smoothing = .6
+        smoothing = .5
         window_width = self.centroid_window_width
         window_height = self.centroid_window_height  # Break image into 9 vertical layers since image height is 720
         assert thresholded.shape[0] % window_height == 0
@@ -511,6 +560,12 @@ class Lanes:
                                        band)
                     lane_points[side][(mask == 1) & (thresholded == 255)] = 255
 
+        new_coefficients = [None] * len(Lanes.Side)
+        new_smoothing_coefficients = [None] * len(Lanes.Side)
+        new_curve_rad = [None] * len(Lanes.Side)
+        new_x0 = [None] * len(Lanes.Side)
+        new_y0 = [None] * len(Lanes.Side)
+        new_fitx = [None] * len(Lanes.Side)
         # Fit points believed to belong to lane line markers by interpolation
         for side in Lanes.Side:
             point_coords = np.where(lane_points[side] == 255)
@@ -518,26 +573,30 @@ class Lanes:
                 current_coefficients = np.polyfit(point_coords[0], point_coords[1], 2)
                 # Do the smoothing
                 if self.smoothing_coefficients[side] is None:
-                    self.smoothing_coefficients[side] = current_coefficients
-                    self.coefficients[side] = current_coefficients
+                    new_smoothing_coefficients[side] = current_coefficients
+                    new_coefficients[side] = current_coefficients
                 else:
-                    self.coefficients[side] = (1 - smoothing) * current_coefficients + smoothing * \
-                                                                                       self.smoothing_coefficients[side]
-                    self.smoothing_coefficients[side] = self.coefficients[side]
+                    new_coefficients[side] = (1 - smoothing) * current_coefficients + smoothing * \
+                                                                                      self.smoothing_coefficients[side]
+                    new_smoothing_coefficients[side] = self.coefficients[side]
                 # Measure and store the curvature radius and center of curvature
-                self.x0[side], self.y0[side], self.curve_rad[side] = measure_curve_rad(point_coords[0],
-                                                                                       point_coords[1])
-                self.fitx[side] = self.coefficients[side][0] * self.ploty ** 2 + self.coefficients[side][
-                                                                                     1] * self.ploty + \
-                                  self.coefficients[side][2]
+                new_x0[side], new_y0[side], new_curve_rad[side] = measure_curve_rad(point_coords[0],
+                                                                                    point_coords[1])
+                new_fitx[side] = new_coefficients[side][0] * self.ploty ** 2 + new_coefficients[side][
+                                                                                   1] * self.ploty + \
+                                 new_coefficients[side][2]
 
-            else:
-                # If not points were detected, there is nothing to interpolate
-                self.coefficients[side] = None
-                self.smoothing_coefficients[side] = None
-                self.curve_rad[side] = None
-                self.x0[side] = None
-                self.y0[side] = None
+        self.is_good= [False] * len(Lanes.Side)
+        if is_sound(x0=new_x0, y0=new_y0, curve_rad=new_curve_rad):
+            for side in Lanes.Side:
+                if new_coefficients[side] is not None:
+                    self.coefficients[side] = new_coefficients[side]
+                    self.smoothing_coefficients[side] = new_smoothing_coefficients[side]
+                    self.curve_rad[side] = new_curve_rad[side]
+                    self.x0[side] = new_y0[side]
+                    self.y0[side] = new_y0[side]
+                    self.fitx[side] = new_fitx[side]
+                    self.is_good[side] = True
 
         # Store the list of y and x coordinates of points detected as part of a lane line marker
         self.lane_points = lane_points
@@ -598,10 +657,14 @@ class Lanes:
 
         # Write wanted information on the image
         font = cv2.FONT_HERSHEY_SIMPLEX
-        sanity = ((self.x0[0] - self.x0[1]) ** 2 + (self.y0[0] - self.y0[1]) ** 2) ** .5
-        to_print = 'Radius left={:.0f}m right={:.0f}m sanity={:.1f}'.format(self.curve_rad[0], self.curve_rad[1],
-                                                                            sanity)
-        text_color = (255, 255, 255) if self.is_sound() else (0, 0, 255)
+        sanity = ((self.x0[0] - self.x0[1]) ** 2 + (self.y0[0] - self.y0[1]) ** 2) ** .5 if None not in self.x0 and None not in self.y0 else 0
+        left_check = ' ' if self.is_good[0] else 'X'
+        right_check = ' ' if self.is_good[1] else 'X'
+        left_rad= self.curve_rad[0] if self.curve_rad[0] is not None else 0
+        right_rad = self.curve_rad[1] if self.curve_rad[1] is not None else 0
+        to_print = 'Radius left={:.0f}m right={:.0f}m Centre dist={:.1f}m [{}] [{}]'.format(left_rad, right_rad,
+                                                                            sanity, left_check, right_check)
+        text_color = (255, 255, 255) if self.is_good[0] and self.is_good[1] else (0, 0, 255)
         cv2.putText(processed_image, to_print, (0, 50), font, 1, text_color, 2, cv2.LINE_AA)
 
         # Job done, return the result
@@ -615,6 +678,9 @@ class Lanes:
         the method uses it inverse to project the colored polygon onto the camera perspective.
         :return: the resulting image.
         '''
+
+        if None in self.fitx:
+            return image
         # Create an initially black image to draw the lines on
         color_warp = np.zeros_like(image).astype(np.uint8)
 
@@ -717,9 +783,7 @@ def main():
     '''
     TODO
     
-    Implement sanity checks to improve first tough section of first video
-    Try with x gradient alone, instead of direction and magnitude
-    Go for the second video
+    Go for the second video <===
     Correct for camera rotation
     Photoshop calibration targets that fail and see if calibration accuracy improves'''
 
