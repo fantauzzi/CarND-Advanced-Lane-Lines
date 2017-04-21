@@ -368,28 +368,15 @@ def measure_curve_rad(y, x):
     curve_rad = (
                     (1 + (
                         2 * coefficients_cr[0] * np.max(y) * ym_per_pix + coefficients_cr[1]) ** 2) ** 1.5) / (
-                2 * coefficients_cr[0])
+                    2 * coefficients_cr[0])
 
-    x0= coefficients_cr[0]*(y0**2)+coefficients_cr[1]*y0+coefficients_cr[2]
+    x0 = coefficients_cr[0] * (y0 ** 2) + coefficients_cr[1] * y0 + coefficients_cr[2]
 
-    m = -2*coefficients_cr[0]
-    x1= x0+m*((1+m**2)**.5)/curve_rad
-    y1= y0+curve_rad/((1+m**2)**.5)
+    m = -2 * coefficients_cr[0]
+    x1 = x0 + m * ((1 + m ** 2) ** .5) / curve_rad
+    y1 = y0 + curve_rad / ((1 + m ** 2) ** .5)
 
     return x1, y1, curve_rad
-
-
-def measure_curve_rad2(coefficients, y):
-    ym_per_pix = 3.48 / 93  # meters per pixel in y dimension
-    xm_per_pix = 3.66 / 748  # meters per pixel in x dimension
-
-    # Calculate the new radii of curvature
-    curve_rad = (
-                    (1 + (
-                        2 * coefficients[0] * y * ym_per_pix + coefficients[1]) ** 2) ** 1.5) / (
-                2 * coefficients[0])
-
-    return curve_rad
 
 
 class Lanes:
@@ -397,15 +384,15 @@ class Lanes:
         LEFT = 0
         RIGHT = 1
 
-    def __init__(self):
+    def __init__(self, vertical_resolution):
         self.coefficients = [None] * len(Lanes.Side)
         self.smoothing_coefficients = [None] * len(Lanes.Side)
         self.lane_points = [None] * len(Lanes.Side)
         self.centroid_window_width = 100
         self.centroid_window_height = 80
         self.centroid_window_margin = 50  # Tune carefully!
-        n_rows = 720 // self.centroid_window_height  # TODO fix this hard-wiring
-        assert 720 % n_rows == 0
+        n_rows = int(vertical_resolution) // self.centroid_window_height
+        assert vertical_resolution % n_rows == 0
         self.centroids = [[None] * len(Lanes.Side) for _ in range(n_rows)]
         self.filter = gaussian(self.centroid_window_width, std=self.centroid_window_width / 2, sym=True)
         self.default_center_x = [None] * len(Lanes.Side)
@@ -413,8 +400,8 @@ class Lanes:
         self.curve_rad = [None] * len(Lanes.Side)
         self.x0 = [None] * len(Lanes.Side)
         self.y0 = [None] * len(Lanes.Side)
-        self.ploty = None
-        self.fitx= [None] * len(Lanes.Side)
+        self.ploty = np.linspace(0, vertical_resolution - 1, vertical_resolution)
+        self.fitx = [None] * len(Lanes.Side)
 
     def find_window_centroids(self, thresholded, window_width, window_height, margin):
         # Result of convolution below this threshold will have the corresponding sliding window ignored, any thresholded point in it will not enter lane line interpolation
@@ -515,20 +502,21 @@ class Lanes:
         # Points used to draw all the left and right windows
         lane_points = [np.zeros_like(thresholded), np.zeros_like(thresholded)]
 
-        # Go through each level and draw the windows
-        for level in range(0, len(self.centroids)):
+        # Go through each band and draw into `lane_points` all points from `thresholded` that are in any sliding window
+        for band in range(0, len(self.centroids)):
             for side in Lanes.Side:
-                # Window_mask is a function to draw window areas
-                # Add graphic points from window mask here to total pixels found
-                if self.centroids[level][side] is not None:
-                    mask = window_mask(window_width, window_height, thresholded, self.centroids[level][side],
-                                       level)
+                # Copy all points from the given window in thresholded into `lane_points`
+                if self.centroids[band][side] is not None:
+                    mask = window_mask(window_width, window_height, thresholded, self.centroids[band][side],
+                                       band)
                     lane_points[side][(mask == 1) & (thresholded == 255)] = 255
-        point_coords = [None] * len(Lanes.Side)
+
+        # Fit points believed to belong to lane line markers by interpolation
         for side in Lanes.Side:
-            point_coords[side] = np.where(lane_points[side] == 255)
-            if len(point_coords[side][0]) > 0:
-                current_coefficients = np.polyfit(point_coords[side][0], point_coords[side][1], 2)
+            point_coords = np.where(lane_points[side] == 255)
+            if len(point_coords[0]) > 0:
+                current_coefficients = np.polyfit(point_coords[0], point_coords[1], 2)
+                # Do the smoothing
                 if self.smoothing_coefficients[side] is None:
                     self.smoothing_coefficients[side] = current_coefficients
                     self.coefficients[side] = current_coefficients
@@ -536,90 +524,118 @@ class Lanes:
                     self.coefficients[side] = (1 - smoothing) * current_coefficients + smoothing * \
                                                                                        self.smoothing_coefficients[side]
                     self.smoothing_coefficients[side] = self.coefficients[side]
-                self.x0[side], self.y0[side], self.curve_rad[side] = measure_curve_rad(point_coords[side][0], point_coords[side][1])
-                # self.curve_rad[side] = measure_curve_rad2(self.coefficients[side], np.max(point_coords[side][0]))
-                # Now our radius of curvature is in meters
+                # Measure and store the curvature radius and center of curvature
+                self.x0[side], self.y0[side], self.curve_rad[side] = measure_curve_rad(point_coords[0],
+                                                                                       point_coords[1])
+                self.fitx[side] = self.coefficients[side][0] * self.ploty ** 2 + self.coefficients[side][
+                                                                                     1] * self.ploty + \
+                                  self.coefficients[side][2]
+
             else:
+                # If not points were detected, there is nothing to interpolate
                 self.coefficients[side] = None
                 self.smoothing_coefficients[side] = None
                 self.curve_rad[side] = None
+                self.x0[side] = None
+                self.y0[side] = None
 
+        # Store the list of y and x coordinates of points detected as part of a lane line marker
         self.lane_points = lane_points
         self.thresholded = thresholded  # Store the thresholded bitmap so it can be used for visualisation
 
+    def is_sound(self):
+        ''' Assesses the goodness of the last lane detection and interpolation, returns True if it is good for both
+        lane line markers, False otherwise.'''
+        curv_center_dist = ((self.x0[0] - self.x0[1]) ** 2 + (self.y0[0] - self.y0[1]) ** 2) ** .5
+        if curv_center_dist > 50000 and (abs(self.curve_rad[0]) < 800 or abs(self.curve_rad[1]) < 800):
+            return False
+        if curv_center_dist > 200000:
+            return False
+        if (abs(self.curve_rad[0]) < 800 or abs(self.curve_rad[1]) < 800) and self.curve_rad[0] / self.curve_rad[1] < 0:
+            return False
+        return True
+
     def overlay_top_view(self, image):
         """
-        Overlays the given image with a top view of thresholded and masked pixels, sliding windows and detected lane
-        lines and returns the result.
+        Overlays the given image with a top view of thresholded and masked pixels, sliding windows, detected lane
+        line markers and some measures taken, and returns the result.
         """
 
         ''' Thresholded pixels belonging to the right lane line are cyan, to the left lane line are magenta, not
         belonging to any line are blue; sliding windows are outlilned in green and detected lanes are red '''
 
-        color_lane_points = np.array(
+        ''' Start with an image with thresholded pointss in different color, depending on the fact that they were
+        detected as part of either lane line marker, or none.'''
+        processed_image = np.array(
             cv2.merge((self.thresholded, self.lane_points[Lanes.Side.RIGHT], self.lane_points[Lanes.Side.LEFT])),
             np.uint8)
 
-        ploty = np.linspace(0, color_lane_points.shape[0] - 1, color_lane_points.shape[0])
-        self.ploty=ploty
-        fit_points = []
+        # Draw the line result of interpolation
         for side in Lanes.Side:
             if self.coefficients[side] is None:
                 continue
-            fitx = self.coefficients[side][0] * ploty ** 2 + self.coefficients[side][1] * ploty + \
-                   self.coefficients[side][2]
-            fit_points.append(np.array((fitx, ploty), np.int32).T.reshape((-1, 1, 2)))
-            self.fitx[side] = fitx
-            # fit_points[-1] = fit_points[-1].reshape((-1, 1, 2))
-            color_lane_points = cv2.polylines(color_lane_points,
-                                              [fit_points[-1]],
-                                              False,
-                                              (0, 0, 255),
-                                              thickness=3)
+            fit_points = np.array((self.fitx[side], self.ploty), np.int32).T.reshape((-1, 1, 2))
+            processed_image = cv2.polylines(processed_image,
+                                            [fit_points],
+                                            False,
+                                            (0, 0, 255),
+                                            thickness=3)
+
+        # Draw the sliding windows
         for i_row, row in enumerate(self.centroids):
             for item in row:
                 if item is not None:
-                    color_lane_points = cv2.rectangle(color_lane_points,
-                                                      (int(item) - self.centroid_window_width // 2,
-                                                       self.centroid_window_height * (len(self.centroids) - i_row) - 1),
-                                                      (int(item) + self.centroid_window_width // 2,
-                                                       self.centroid_window_height * (
-                                                           len(self.centroids) - i_row - 1)),
-                                                      color=(0, 255, 0))  # Remember color is in (B,G,R)!
+                    processed_image = cv2.rectangle(processed_image,
+                                                    (int(item) - self.centroid_window_width // 2,
+                                                     self.centroid_window_height * (len(self.centroids) - i_row) - 1),
+                                                    (int(item) + self.centroid_window_width // 2,
+                                                     self.centroid_window_height * (
+                                                         len(self.centroids) - i_row - 1)),
+                                                    color=(0, 255, 0))
 
-        color_lane_points = cv2.addWeighted(image, .5, color_lane_points, .5, 0)
+        # Overlay the obtained image to the given image
+        processed_image = cv2.addWeighted(image, .5, processed_image, .5, 0)
 
+        # Write wanted information on the image
         font = cv2.FONT_HERSHEY_SIMPLEX
-        sanity = ((self.x0[0]-self.x0[1])**2 +(self.y0[0]-self.y0[1])**2)**.5
+        sanity = ((self.x0[0] - self.x0[1]) ** 2 + (self.y0[0] - self.y0[1]) ** 2) ** .5
         to_print = 'Radius left={:.0f}m right={:.0f}m sanity={:.1f}'.format(self.curve_rad[0], self.curve_rad[1],
-                                                                              sanity)
-        cv2.putText(color_lane_points, to_print, (0, 50), font, 1, (255, 255, 255), 2, cv2.LINE_AA)
-        return color_lane_points
+                                                                            sanity)
+        text_color = (255, 255, 255) if self.is_sound() else (0, 0, 255)
+        cv2.putText(processed_image, to_print, (0, 50), font, 1, text_color, 2, cv2.LINE_AA)
+
+        # Job done, return the result
+        return processed_image
 
     def overlay_lanes(self, image, M):
-        # Create an image to draw the lines on
+        '''
+        Color in the given image the area corresponding to the detected lane.
+        :param image: a color image taken by the camera (shoudl be already corrected for distortion)
+        :param M: the transformation matrix previously used to warp camera images to the brid-eye view;
+        the method uses it inverse to project the colored polygon onto the camera perspective.
+        :return: the resulting image.
+        '''
+        # Create an initially black image to draw the lines on
         color_warp = np.zeros_like(image).astype(np.uint8)
-        # color_warp = np.dstack((warp_zero, warp_zero, warp_zero))
-
 
         # Recast the x and y points into usable format for cv2.fillPoly()
         pts_left = np.array([np.transpose(np.vstack([self.fitx[0], self.ploty]))])
         pts_right = np.array([np.flipud(np.transpose(np.vstack([self.fitx[1], self.ploty])))])
         pts = np.hstack((pts_left, pts_right))
-
-        # TODO make this more readable
-        # Draw the lane onto the warped blank image
         pts = np.squeeze(pts)
         pts = np.expand_dims(pts, 1)
 
-        # cv2.polylines(color_warp, np.int_([pts]), True, (0, 255, 255))
+        # Draw the lane onto the warped blank image
         cv2.fillPoly(color_warp, np.int_([pts]), (0, 255, 0))
 
         # Warp the blank back to original image space using inverse perspective matrix (Minv)
-        newwarp = cv2.warpPerspective(color_warp, M, (color_warp.shape[1], color_warp.shape[0]), flags=cv2.WARP_INVERSE_MAP)
+        newwarp = cv2.warpPerspective(color_warp, M, (color_warp.shape[1], color_warp.shape[0]),
+                                      flags=cv2.WARP_INVERSE_MAP)
         # Combine the result with the original image
         result = cv2.addWeighted(image, 1, newwarp, 0.3, 0)
+
         return result
+
 
 def main():
     if not os.path.exists(output_dir):
@@ -656,14 +672,15 @@ def main():
     output_fname = 'out_' + input_fname
     vidcap = cv2.VideoCapture(input_fname)
     fps = vidcap.get(cv2.CAP_PROP_FPS)
+    vertical_resolution = vidcap.get(cv2.CAP_PROP_FRAME_HEIGHT)
     assert fps > 0
     fourcc = cv2.VideoWriter_fourcc(*'XVID')
     vidwrite = cv2.VideoWriter(output_fname, fourcc=fourcc, fps=fps, frameSize=(1280, 720))
-    print('Source video is at', fps, 'fps')
+    print('Source video is at', fps, 'fps with vertical resolution', vertical_resolution)
 
     count_processes = 0
     M = None  # Perspective transformation, will be determined later
-    lines = Lanes()
+    lanes = Lanes(vertical_resolution)
     start_time = time.time()
     while (True):
         read, frame = vidcap.read()
@@ -684,13 +701,11 @@ def main():
         thresholded = threshold(warped)
 
         # Find the lane marking lines
-        lines.fit(thresholded)
+        lanes.fit(thresholded)
         # Overlay bird-eye view information on the image
-        overlay_img = lines.overlay_top_view(undistorted_img)
+        overlay_img = lanes.overlay_top_view(undistorted_img)
         # Fetch an image with marked lanes on overlay
-        img_with_lanes = lines.overlay_lanes(overlay_img, M)
-
-
+        img_with_lanes = lanes.overlay_lanes(overlay_img, M)
 
         vidwrite.write(img_with_lanes)
         count_processes += 1
@@ -702,7 +717,6 @@ def main():
     '''
     TODO
     
-    Clean-up code for drawing overlays
     Implement sanity checks to improve first tough section of first video
     Try with x gradient alone, instead of direction and magnitude
     Go for the second video
