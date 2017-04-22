@@ -424,7 +424,7 @@ class Lanes:
         self.lane_points = [None] * len(Lanes.Side)
         self.centroid_window_width = 100
         self.centroid_window_height = 80
-        self.centroid_window_margin = 50  # Tune carefully!
+        self.centroid_window_margin = 75  # Tune carefully!
         n_rows = int(vertical_resolution) // self.centroid_window_height
         assert vertical_resolution % n_rows == 0
         self.centroids = [[None] * len(Lanes.Side) for _ in range(n_rows)]
@@ -440,7 +440,7 @@ class Lanes:
 
     def find_window_centroids(self, thresholded, window_width, window_height, margin):
         # Result of convolution below this threshold will have the corresponding sliding window ignored, any thresholded point in it will not enter lane line interpolation
-        min_acceptable = 100.
+        min_acceptable = 10.
         new_centroids = []  # Store the (left,right) window centroid positions per level
 
         ''' Partition the image in horizontal bands of height self.height, numbered starting from 0, where band 0
@@ -516,7 +516,7 @@ class Lanes:
         self.centroids = new_centroids
         return new_centroids
 
-    def fit(self, thresholded):
+    def fit(self, thresholded, vidcap = None):
         """
         Fits the given single-channel image, which should be the output of thresholding, with two lines,
         that should correspond to the left and right lane markers. On exit, self.coefficients holds coefficients
@@ -537,6 +537,10 @@ class Lanes:
             if (abs(curve_rad[0]) < 800 or abs(curve_rad[1]) < 800) and curve_rad[0] / curve_rad[1] < 0:
                 return False
             return True
+
+        if vidcap is not None and vidcap.get(cv2.CAP_PROP_POS_MSEC) >= 6000:
+            print('Here!')
+
 
         ''' Number in interval [0, 1), governs the smoothing of interpolated lane lines; closer to 1 is smoother, closer
         to 0 is jerkier; if set to 0, there is no interpolation. '''
@@ -733,8 +737,8 @@ def main():
         return
 
     #############################################################
-    input_fname = 'project_video.mp4'
-    # input_fname = 'harder_challenge_video.mp4'
+    # input_fname = 'project_video.mp4'
+    input_fname = 'challenge_video.mp4'
     output_fname = 'out_' + input_fname
     vidcap = cv2.VideoCapture(input_fname)
     fps = vidcap.get(cv2.CAP_PROP_FPS)
@@ -747,6 +751,7 @@ def main():
     count_processes = 0
     M = None  # Perspective transformation, will be determined later
     lanes = Lanes(vertical_resolution)
+    # vidcap.set(cv2.CAP_PROP_POS_MSEC, 6000)
     start_time = time.time()
     while (True):
         read, frame = vidcap.read()
@@ -767,7 +772,7 @@ def main():
         thresholded = threshold(warped)
 
         # Find the lane marking lines
-        lanes.fit(thresholded)
+        lanes.fit(thresholded, vidcap)
         # Overlay bird-eye view information on the image
         overlay_img = lanes.overlay_top_view(undistorted_img)
         # Fetch an image with marked lanes on overlay
