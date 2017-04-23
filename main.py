@@ -134,14 +134,83 @@ def undistort_image(image, mtx, dist, roi):
     return undistorted_image
 
 
+class SlidingWindow:
+    def __init__(x0, y0, width, height):
+        pass
+
+
+class LaneLine:
+    def __init__(self, windows_shape, image_shape):
+        self._windows_shape = windows_shape
+        self._image_shape = image_shape
+        assert image_shape[0] % windows_shape[0] == 0
+        self._n_bands = image_shape[0] // windows_shape[0]
+        self._centroids = np.array([None] * self._n_bands)
+        self._bottom_x = None
+
+    def get_centroid_x(self, band):
+        return self._centroids[band]
+
+    def get_bottom_x(self):
+        return self._bottom_x
+
+    def get_recenter_roi(self, _):
+        raise NotImplementedError
+
+    def get_printable_name(self):
+        raise NotImplementedError
+
+    def recenter(self, thresholded, filter):
+        assert thresholded.shape == self._image_shape
+        print('Re-centering '+self.get_printable_name())
+        index, offset = self.get_recenter_roi(thresholded)
+        area_sum = np.sum(thresholded[index], axis=0)
+        self._bottom_x = np.argmax(np.convolve(filter, area_sum)) - self._windows_shape[1] / 2 + offset
+        return self._bottom_x
+
+
+class LeftLaneLine(LaneLine):
+    #def __init__(self):
+    #    pass
+
+    def get_printable_name(self):
+        return 'left'
+
+    def get_recenter_roi(self, thresholded):
+        index = np.s_[int(3 * thresholded.shape[0] / 4):, :int(thresholded.shape[1] / 2)]
+        offset = 0
+        return index, offset
+
+
+class RightLaneLine(LaneLine):
+    #def __init__(self):
+    #    pass
+
+    def get_printable_name(self):
+        return 'right'
+
+    def get_recenter_roi(self, thresholded):
+        index = np.s_[int(3 * thresholded.shape[0] / 4):, int(thresholded.shape[1] / 2):]
+        offset = int(thresholded.shape[1] / 2)
+        return index, offset
+
+
 class ImageProcessing:
     def __init__(self):
         self._unprocessed = None
         self.invalidate()
+        # Computation parameters, tune with care
+        # TODO give them beter names and document them
+        self.min_acceptable = 10.
+        self.centroid_window_width = 100
+        self.centroid_window_height = 80
+        self.centroid_window_margin = 50
+        self.filter = gaussian(self.centroid_window_width, std=self.centroid_window_width / 8, sym=True)
 
     def invalidate(self):
         self._top_view = None
         self._thresholded = None
+        self._lane_lines = None
 
     def get_top_view(self):
         if self._top_view is None:
@@ -216,8 +285,69 @@ class ImageProcessing:
             self._thresholded = thresholded
         return self._thresholded
 
-    def get_centroids(self):
-        pass
+    def position_windows(self):
+        """
+        Determines the locations in the thresholded images that should be occoupied by either lane line marks (left
+         and right), as a set of windows. Instantiates two LaneLine objects and store them in _lane_lines, to hold
+         each information about the respective windows.
+        """
+        assert self._thresholded is not None
+        args = ((self.centroid_window_height, self.centroid_window_width), self._thresholded.shape)
+        self._lane_lines = [LeftLaneLine(*args), RightLaneLine(*args)]
+        assert self._thresholded.shape[0] % self.centroid_window_height == 0
+        n_bands = self._thresholded.shape[0] // self.centroid_window_height
+        ''' Partition the image in horizontal bands of height self.height, numbered starting from 0, where band 0
+        is at the bottom of the image (closest to the camera) '''
+        convolved_bands = []
+        for band in range(n_bands):
+            # convolve the band with a pre-computed filter, stored in self.filter, to detect lane line markers
+            image_band = np.sum(
+                self._thresholded[
+                int(self._thresholded.shape[0] - (band + 1) * self.centroid_window_height):int(
+                    self._thresholded.shape[0] - band * self.centroid_window_height),
+                :],
+                axis=0)
+            convolved_bands.append(np.convolve(self.filter, image_band))
+
+        new_centroids_x = [[], []]  # Will collect two lists of centroid x coordinates, one list per lane line
+        for lane_line in self._lane_lines:
+            ''' For every band in the thresholded image starting from the bottom, find a window in that band containing
+            lane line points '''
+            lane_centroids_x = []  # Will collect x coordinate of centroids for the current lane_line, one per band
+            for band in range(n_bands):
+                ''' First determine a `staring_x` value, in which surroundings to look for lane line points for the
+                        current band. Then look in a sliding window in the current band around `starting_x`'''
+                if band == 0:
+                    ''' Special treatement for band 0, at the bottom of the image. If you don't already have a window
+                    in that band where to look for lane lines (from previous frames), then determine it staring from the
+                    hystogram of the left or right bottom quarter of the image (left or right, depending on which lane). '''
+                    if lane_line.get_centroid_x(0) is None:
+                        print('Recentering lane')
+                        lane_line.recenter(self._thresholded, self.filter)
+                    starting_x = lane_line.get_bottom_x()
+                else:
+                    ''' For other bands different from the bottom one, find the first window (from the top) in a band below,
+                    and use the x of its centroid as teh starting x for the window'''
+                    for band_below in range(band - 1, -1, -1):
+                        if lane_centroids_x[band_below] is not None:
+                            starting_x = lane_centroids_x[band_below]
+                            break
+                    else:
+                        starting_x = lane_line.get_bottom_x()
+                        assert starting_x is not None
+                ''' Now that you have `starting_x`, do a convolution of the thresholded image, with a filter, around
+                `starting_x` in the current band, looking for lane line points '''
+                offset = self.centroid_window_width / 2
+                min_index = int(max(starting_x + offset - self.centroid_window_margin, 0))
+                max_index = int(min(starting_x + offset + self.centroid_window_margin, self._thresholded.shape[1]))
+                # Compute the x coordinate of the centroid of the window that contains lane line points
+                centroid_x = np.argmax(convolved_bands[band][min_index:max_index]) + min_index - offset
+                # TODO test for goodness
+                goodness = np.max(convolved_bands[band][min_index:max_index])
+                # Update the list of centroid x coordinates with what just found for the current lane line and band
+                lane_centroids_x.append(centroid_x)
+            new_centroids_x.append(lane_centroids_x)
+            # Now verify the sanity of found centroids, and update the two lane lines with centroids that passed the sanity test
 
     def get_lanes(self):
         pass
@@ -227,6 +357,7 @@ class ImageProcessing:
         self.invalidate()
         top_view = self.get_top_view()
         thresholded = self.get_thresholded()
+        self.position_windows()
         thresholded_color = cv2.merge((thresholded, thresholded, thresholded))
         return thresholded_color
 

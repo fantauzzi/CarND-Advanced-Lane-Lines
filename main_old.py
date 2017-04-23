@@ -805,6 +805,7 @@ def main():
         vidwrite.write(img_with_lanes)
         count_processes += 1
         if count_processes % 100 == 0:
+            break
             pass
 
     print('\nRate', count_processes / (time.time() - start_time), 'fps.')
