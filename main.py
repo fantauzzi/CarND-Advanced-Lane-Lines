@@ -134,9 +134,10 @@ def undistort_image(image, mtx, dist, roi):
     return undistorted_image
 
 
-class SlidingWindow:
-    def __init__(x0, y0, width, height):
-        pass
+class Centroid:
+    def __init__(self, x, goodness):
+        self.x = x
+        self.goodness = goodness
 
 
 class LaneLine:
@@ -149,7 +150,10 @@ class LaneLine:
         self._bottom_x = None
 
     def get_centroid_x(self, band):
-        return self._centroids[band]
+        return self._centroids[band] if self._centroids[band] is not None else None
+
+    def get_centroids(self):
+        return np.copy(self._centroids)
 
     def get_bottom_x(self):
         return self._bottom_x
@@ -162,15 +166,19 @@ class LaneLine:
 
     def recenter(self, thresholded, filter):
         assert thresholded.shape == self._image_shape
-        print('Re-centering '+self.get_printable_name())
         index, offset = self.get_recenter_roi(thresholded)
         area_sum = np.sum(thresholded[index], axis=0)
-        self._bottom_x = np.argmax(np.convolve(filter, area_sum)) - self._windows_shape[1] / 2 + offset
+        # self._bottom_x = np.argmax(np.convolve(filter, area_sum)) - self._windows_shape[1] / 2 + offset
+        self._bottom_x = np.argmax(np.convolve(filter, area_sum, mode='same')) + offset
         return self._bottom_x
 
 
+    def set_centroids(self, centroids):
+        self._centroids = np.copy(centroids)
+
+
 class LeftLaneLine(LaneLine):
-    #def __init__(self):
+    # def __init__(self):
     #    pass
 
     def get_printable_name(self):
@@ -183,7 +191,7 @@ class LeftLaneLine(LaneLine):
 
 
 class RightLaneLine(LaneLine):
-    #def __init__(self):
+    # def __init__(self):
     #    pass
 
     def get_printable_name(self):
@@ -198,6 +206,7 @@ class RightLaneLine(LaneLine):
 class ImageProcessing:
     def __init__(self):
         self._unprocessed = None
+        self._lane_lines = None
         self.invalidate()
         # Computation parameters, tune with care
         # TODO give them beter names and document them
@@ -210,7 +219,6 @@ class ImageProcessing:
     def invalidate(self):
         self._top_view = None
         self._thresholded = None
-        self._lane_lines = None
 
     def get_top_view(self):
         if self._top_view is None:
@@ -292,10 +300,12 @@ class ImageProcessing:
          each information about the respective windows.
         """
         assert self._thresholded is not None
-        args = ((self.centroid_window_height, self.centroid_window_width), self._thresholded.shape)
-        self._lane_lines = [LeftLaneLine(*args), RightLaneLine(*args)]
+        if self._lane_lines is None:
+            args = ((self.centroid_window_height, self.centroid_window_width), self._thresholded.shape)
+            self._lane_lines = [LeftLaneLine(*args), RightLaneLine(*args)]
         assert self._thresholded.shape[0] % self.centroid_window_height == 0
         n_bands = self._thresholded.shape[0] // self.centroid_window_height
+
         ''' Partition the image in horizontal bands of height self.height, numbered starting from 0, where band 0
         is at the bottom of the image (closest to the camera) '''
         convolved_bands = []
@@ -307,9 +317,9 @@ class ImageProcessing:
                     self._thresholded.shape[0] - band * self.centroid_window_height),
                 :],
                 axis=0)
-            convolved_bands.append(np.convolve(self.filter, image_band))
+            convolved_bands.append(np.convolve(self.filter, image_band, mode='same'))
 
-        new_centroids_x = [[], []]  # Will collect two lists of centroid x coordinates, one list per lane line
+        new_centroids_x = []  # Will collect two lists of centroid x coordinates, one list per lane line
         for lane_line in self._lane_lines:
             ''' For every band in the thresholded image starting from the bottom, find a window in that band containing
             lane line points '''
@@ -322,7 +332,7 @@ class ImageProcessing:
                     in that band where to look for lane lines (from previous frames), then determine it staring from the
                     hystogram of the left or right bottom quarter of the image (left or right, depending on which lane). '''
                     if lane_line.get_centroid_x(0) is None:
-                        print('Recentering lane')
+                        print('Recentering lane', lane_line.get_printable_name())
                         lane_line.recenter(self._thresholded, self.filter)
                     starting_x = lane_line.get_bottom_x()
                 else:
@@ -337,20 +347,50 @@ class ImageProcessing:
                         assert starting_x is not None
                 ''' Now that you have `starting_x`, do a convolution of the thresholded image, with a filter, around
                 `starting_x` in the current band, looking for lane line points '''
-                offset = self.centroid_window_width / 2
-                min_index = int(max(starting_x + offset - self.centroid_window_margin, 0))
-                max_index = int(min(starting_x + offset + self.centroid_window_margin, self._thresholded.shape[1]))
+                # min_index = int(max(starting_x + offset - self.centroid_window_margin, 0))
+                # max_index = int(min(starting_x + offset + self.centroid_window_margin, self._thresholded.shape[1]))
+                min_index = int(max(starting_x - self.centroid_window_margin, 0))
+                max_index = int(min(starting_x + self.centroid_window_margin, self._thresholded.shape[1]))
                 # Compute the x coordinate of the centroid of the window that contains lane line points
-                centroid_x = np.argmax(convolved_bands[band][min_index:max_index]) + min_index - offset
+                # centroid_x = np.argmax(convolved_bands[band][min_index:max_index]) + min_index - offset
+                centroid_x = np.argmax(convolved_bands[band][min_index:max_index]) + min_index
                 # TODO test for goodness
                 goodness = np.max(convolved_bands[band][min_index:max_index])
                 # Update the list of centroid x coordinates with what just found for the current lane line and band
                 lane_centroids_x.append(centroid_x)
             new_centroids_x.append(lane_centroids_x)
-            # Now verify the sanity of found centroids, and update the two lane lines with centroids that passed the sanity test
+        # Now verify the sanity of found centroids, and update the two lane lines with centroids that passed the sanity test
+
+        for lane_line, centroids in zip(self._lane_lines, new_centroids_x):
+            lane_line.set_centroids(centroids)
 
     def get_lanes(self):
         pass
+
+    def overlay_windows(self, image):
+        # Draw the sliding windows
+        image_with_overlay = None
+        for lane_line in self._lane_lines:
+            centroids = lane_line.get_centroids()
+            for band, centroid in enumerate(centroids):
+                if centroid is not None:
+                    rect_x0 = int(centroid) - self.centroid_window_width // 2
+                    rect_y0 = self.centroid_window_height * (len(centroids) - band) - 1
+                    image_with_overlay = cv2.rectangle(image,
+                                                       (rect_x0,
+                                                        rect_y0),
+                                                       (int(centroid) + self.centroid_window_width // 2,
+                                                        self.centroid_window_height * (
+                                                            len(centroids) - band - 1)),
+                                                       color=(0, 255, 0))
+                    text_color = (255, 255, 255)
+                    font = cv2.FONT_HERSHEY_SIMPLEX
+                    gap = 10
+                    cv2.putText(image_with_overlay, str(centroid.goodness),
+                                (rect_x0 + self.centroid_window_width + gap, rect_y0), font, 1, text_color, 1,
+                                cv2.LINE_AA)
+
+        return image_with_overlay if image_with_overlay is not None else image
 
     def process_frame(self, frame):
         self._unprocessed = frame
@@ -359,6 +399,7 @@ class ImageProcessing:
         thresholded = self.get_thresholded()
         self.position_windows()
         thresholded_color = cv2.merge((thresholded, thresholded, thresholded))
+        # with_windows = self.overlay_windows(thresholded_color)
         return thresholded_color
 
 
@@ -394,6 +435,8 @@ if __name__ == '__main__':
     # vidcap.set(cv2.CAP_PROP_POS_MSEC, 6000)
     start_time = time.time()
 
+    '''plt.ion()
+    ax = None'''
     processor = ImageProcessing()
     while (True):  # TODO consider to move it to an OpenCV loop
         read, frame = vidcap.read()
@@ -405,7 +448,15 @@ if __name__ == '__main__':
         undistorted_img = undistort_image(frame, mtx, dist, roi)
         processed = processor.process_frame(undistorted_img)
         vidwrite.write(processed)
+        '''assert processed.shape == (720, 1280, 3)
+        if frame_counter == 1:
+            ax = plt.imshow(processed)
+        else:
+            ax.set_data(processed)
+            plt.draw()
+        plt.pause(0.001)'''
         if frame_counter % 100 == 0:
+            break
             pass
 
     print('\nProcessing rate {:.1f} fps'.format(frame_counter / (time.time() - start_time)))
