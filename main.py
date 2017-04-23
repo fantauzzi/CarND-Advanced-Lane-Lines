@@ -5,6 +5,7 @@ import os
 import glob
 import math
 import time
+import copy
 import matplotlib.gridspec as gridspec
 from matplotlib.widgets import Slider, RadioButtons
 from scipy.signal import gaussian
@@ -150,10 +151,10 @@ class LaneLine:
         self._bottom_x = None
 
     def get_centroid_x(self, band):
-        return self._centroids[band] if self._centroids[band] is not None else None
+        return self._centroids[band].x if self._centroids[band] is not None else None
 
     def get_centroids(self):
-        return np.copy(self._centroids)
+        return copy.deepcopy(self._centroids)
 
     def get_bottom_x(self):
         return self._bottom_x
@@ -174,7 +175,7 @@ class LaneLine:
 
 
     def set_centroids(self, centroids):
-        self._centroids = np.copy(centroids)
+        self._centroids = copy.deepcopy(centroids)
 
 
 class LeftLaneLine(LaneLine):
@@ -210,10 +211,10 @@ class ImageProcessing:
         self.invalidate()
         # Computation parameters, tune with care
         # TODO give them beter names and document them
-        self.min_acceptable = 10.
+        self.min_goodness = 1
         self.centroid_window_width = 100
         self.centroid_window_height = 80
-        self.centroid_window_margin = 50
+        self.centroid_window_margin = 75
         self.filter = gaussian(self.centroid_window_width, std=self.centroid_window_width / 8, sym=True)
 
     def invalidate(self):
@@ -339,8 +340,8 @@ class ImageProcessing:
                     ''' For other bands different from the bottom one, find the first window (from the top) in a band below,
                     and use the x of its centroid as teh starting x for the window'''
                     for band_below in range(band - 1, -1, -1):
-                        if lane_centroids_x[band_below] is not None:
-                            starting_x = lane_centroids_x[band_below]
+                        if lane_centroids_x[band_below] is not None and lane_centroids_x[band_below].goodness >= self.min_goodness:
+                            starting_x = lane_centroids_x[band_below].x
                             break
                     else:
                         starting_x = lane_line.get_bottom_x()
@@ -354,10 +355,9 @@ class ImageProcessing:
                 # Compute the x coordinate of the centroid of the window that contains lane line points
                 # centroid_x = np.argmax(convolved_bands[band][min_index:max_index]) + min_index - offset
                 centroid_x = np.argmax(convolved_bands[band][min_index:max_index]) + min_index
-                # TODO test for goodness
                 goodness = np.max(convolved_bands[band][min_index:max_index])
                 # Update the list of centroid x coordinates with what just found for the current lane line and band
-                lane_centroids_x.append(centroid_x)
+                lane_centroids_x.append(Centroid(centroid_x, goodness))
             new_centroids_x.append(lane_centroids_x)
         # Now verify the sanity of found centroids, and update the two lane lines with centroids that passed the sanity test
 
@@ -374,20 +374,19 @@ class ImageProcessing:
             centroids = lane_line.get_centroids()
             for band, centroid in enumerate(centroids):
                 if centroid is not None:
-                    rect_x0 = int(centroid) - self.centroid_window_width // 2
+                    rect_x0 = int(centroid.x) - self.centroid_window_width // 2
                     rect_y0 = self.centroid_window_height * (len(centroids) - band) - 1
+                    rect_color = (0, 255, 0) if centroid.goodness >= self.min_goodness else (0, 0, 255)
                     image_with_overlay = cv2.rectangle(image,
-                                                       (rect_x0,
-                                                        rect_y0),
-                                                       (int(centroid) + self.centroid_window_width // 2,
-                                                        self.centroid_window_height * (
-                                                            len(centroids) - band - 1)),
-                                                       color=(0, 255, 0))
+                                                       (rect_x0,rect_y0),
+                                                       (rect_x0 + self.centroid_window_width, rect_y0- self.centroid_window_height),
+                                                       color=rect_color)
                     text_color = (255, 255, 255)
                     font = cv2.FONT_HERSHEY_SIMPLEX
-                    gap = 10
-                    cv2.putText(image_with_overlay, str(centroid.goodness),
-                                (rect_x0 + self.centroid_window_width + gap, rect_y0), font, 1, text_color, 1,
+                    gap_x = 10
+                    gap_y = 30
+                    cv2.putText(image_with_overlay, "{:.1f}".format(centroid.goodness),
+                                (rect_x0 + self.centroid_window_width + gap_x, rect_y0 - gap_y), font, .5, text_color, 1,
                                 cv2.LINE_AA)
 
         return image_with_overlay if image_with_overlay is not None else image
@@ -399,8 +398,8 @@ class ImageProcessing:
         thresholded = self.get_thresholded()
         self.position_windows()
         thresholded_color = cv2.merge((thresholded, thresholded, thresholded))
-        # with_windows = self.overlay_windows(thresholded_color)
-        return thresholded_color
+        with_windows = self.overlay_windows(thresholded_color)
+        return with_windows
 
 
 if __name__ == '__main__':
@@ -456,7 +455,6 @@ if __name__ == '__main__':
             plt.draw()
         plt.pause(0.001)'''
         if frame_counter % 100 == 0:
-            break
             pass
 
     print('\nProcessing rate {:.1f} fps'.format(frame_counter / (time.time() - start_time)))
