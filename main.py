@@ -152,31 +152,30 @@ def window_mask(width, height, img_ref, center, band):
     return output
 
 
-def measure_curvature(y, x):
+def measure_curvature(coefficients, y0, mx, my):
     # TODO move these parameters where they belong
-    ym_per_pix = 3.48 / 93  # meters per pixel in y dimension
-    xm_per_pix = 3.66 / 748  # meters per pixel in x dimension
 
-    # Fit new polynomials to x,y in world space
-    coefficients_cr = np.polyfit(y * ym_per_pix, x * xm_per_pix, 2)
-    # Calculate the new radii of curvature
-    y0 = np.max(y)
-    curve_rad = (
-                    (1 + (
-                        2 * coefficients_cr[0] * np.max(y) * ym_per_pix + coefficients_cr[1]) ** 2) ** 1.5) / (
-                    2 * coefficients_cr[0])
+    a = mx / (my ** 2) * coefficients[0]
+    b = mx / my * coefficients[1]
+    c = coefficients[2]
+    Y0 = y0 * my
 
+    radius = ((1 + (2 * a * Y0 + b) ** 2) ** 1.5) / (2 * a)
+
+    '''
     x0 = coefficients_cr[0] * (y0 ** 2) + coefficients_cr[1] * y0 + coefficients_cr[2]
 
     m = -2 * coefficients_cr[0]
     x1 = x0 + m * ((1 + m ** 2) ** .5) / curve_rad
     y1 = y0 + curve_rad / ((1 + m ** 2) ** .5)
+    '''
 
-    return (x1, y1), curve_rad
+    # return (x1, y1), curve_rad
+    return (None, None), radius
 
 
 class LaneLine:
-    def __init__(self, windows_shape, image_shape):
+    def __init__(self, windows_shape, image_shape, scale):
         self._windows_shape = windows_shape
         self._image_shape = image_shape
         assert image_shape[0] % windows_shape[0] == 0
@@ -187,6 +186,7 @@ class LaneLine:
         self._smoothing_coefficients = None
         self._curvature_center = None
         self._curvature_radius = None
+        self._scale = scale
 
         # Parameters, tune carefully
         self._smoothing = .5
@@ -252,8 +252,11 @@ class LaneLine:
                 # new_smoothing_coefficients[side] = self.coefficients[side]
                 self._smoothing_coefficients = coefficients
             # Measure and store the curvature radius and center of curvature
-            self._curvature_center, self._curvature_radius = measure_curvature(point_coords[0], point_coords[1])
+            # self._curvature_center, self._curvature_radius = measure_curvature(point_coords[0], point_coords[1])
+            self._curvature_center, self._curvature_radius = measure_curvature(self._coefficients, thresholded.shape[0]-1, self._scale[0], self._scale[1])
 
+    def get_curvature(self):
+        return self._curvature_center, self._curvature_radius
 
 class LeftLaneLine(LaneLine):
     # def __init__(self):
@@ -281,23 +284,43 @@ class RightLaneLine(LaneLine):
         return index, offset
 
 
+def get_lane_width(lane_line1, lane_line2, y):
+    """
+    Returns the distance in pixels between the two lane lines as displayed in a top view, taken horizontally
+    at the given y coordinate
+    """
+    coefficients1 = lane_line1.get_coefficients()
+    if coefficients1 is None:
+        return None
+    coefficients2 = lane_line2.get_coefficients()
+    if coefficients2 is None:
+        return None
+    x1= coefficients1[0]*(y**2)+coefficients1[1]*y+coefficients1[2]
+    x2 = coefficients2[0] * (y ** 2) + coefficients2[1] * y + coefficients2[2]
+    return abs(x1-x2)
+
+
 class ImageProcessing:
     def __init__(self):
         self._unprocessed = None
         self._lane_lines = None
         self._plot_y = None
+        self._M = None
         self.invalidate()
         # Computation parameters, tune with care
         # TODO give them beter names and document them
+        self._mx = 3.66 / 748  # meters per pixel in x dimension
+        self._my = 3.48 / 93  # meters per pixel in y dimension
         self.centroid_window_width = 100
         self.centroid_window_height = 80
-        self.centroid_window_margin = 75
+        self.centroid_window_margin = 75  # TODO tune this!
         self.filter = gaussian(self.centroid_window_width, std=self.centroid_window_width / 8, sym=True)
         self._font = cv2.FONT_HERSHEY_SIMPLEX
 
     def invalidate(self):
         self._top_view = None
         self._thresholded = None
+        self._lanes_points = None
 
     def get_top_view(self):
         if self._top_view is None:
@@ -343,9 +366,9 @@ class ImageProcessing:
 
             # Given the source and target quadrangles, calculate the perspective transform matrix
             source = np.expand_dims(source, 1)  # OpenCV requires this extra dimension
-            M = cv2.getPerspectiveTransform(src=source, dst=target)
+            self._M = cv2.getPerspectiveTransform(src=source, dst=target)
 
-            self._top_view = cv2.warpPerspective(image, M, image.shape[1::-1])
+            self._top_view = cv2.warpPerspective(image, self._M, image.shape[1::-1])
         return self._top_view
 
     def get_thresholded(self):
@@ -380,7 +403,7 @@ class ImageProcessing:
         """
         assert self._thresholded is not None
         if self._lane_lines is None:
-            args = ((self.centroid_window_height, self.centroid_window_width), self._thresholded.shape)
+            args = ((self.centroid_window_height, self.centroid_window_width), self._thresholded.shape, (self._mx, self._my))
             self._lane_lines = [LeftLaneLine(*args), RightLaneLine(*args)]
         assert self._thresholded.shape[0] % self.centroid_window_height == 0
         n_bands = self._thresholded.shape[0] // self.centroid_window_height
@@ -482,19 +505,27 @@ class ImageProcessing:
 
         return image_with_overlay if image_with_overlay is not None else image
 
+    def get_lanes_points(self, v_res):
+        fit_x = [None, None]
+        if self._lanes_points is None:
+            if self._plot_y is None:
+                self._plot_y = np.linspace(0, v_res - 1, v_res)
+            for lane_i, lane_line in enumerate(self._lane_lines):
+                coefficients = lane_line.get_coefficients()
+                if coefficients is None:
+                    continue
+                fit_x[lane_i] = coefficients[0] * self._plot_y ** 2 + coefficients[1] * self._plot_y + coefficients[2]
+        assert self._plot_y is not None
+        return self._plot_y, fit_x
+
     def overlay_lane_lines(self, image):
         assert self._lane_lines is not None
-        if self._plot_y is None:
-            self._plot_y = np.linspace(0, image.shape[0] - 1, image.shape[0])
 
         image_with_lane_lines = image
-        for lane_line in self._lane_lines:
-            coefficients = lane_line.get_coefficients()
-            if coefficients is None:
-                continue
-            fit_x = coefficients[0] * self._plot_y ** 2 + coefficients[1] * self._plot_y + coefficients[2]
+        plot_y, lanes_points = self.get_lanes_points(image.shape[0])
+        for lane_points in lanes_points:
             # Get the formato for fit_x and self._plot_y that cv2.polylines demands
-            fit_points = np.array((fit_x, self._plot_y), np.int32).T.reshape((-1, 1, 2))
+            fit_points = np.array((lane_points, plot_y), np.int32).T.reshape((-1, 1, 2))
             image_with_lane_lines = cv2.polylines(image_with_lane_lines,
                                                   [fit_points],
                                                   False,
@@ -502,8 +533,56 @@ class ImageProcessing:
                                                   thickness=3)
         return image_with_lane_lines
 
+    def overlay_lanes_in_perspective(self, image):
+        '''
+        Color in the given image the area corresponding to the detected lane.
+        :param image: a color image taken by the camera (shoudl be already corrected for distortion)
+        :param M: the transformation matrix previously used to warp camera images to the brid-eye view;
+        the method uses it inverse to project the colored polygon onto the camera perspective.
+        :return: the resulting image.
+        '''
+
+        assert self._M is not None
+        plot_y, fit_x = self.get_lanes_points(image.shape[0])
+
+        # If either lane is not available, give up and return the input image, unchanged
+        if fit_x[0] is None or fit_x[1] is None:
+            return image
+
+        # Create an initially black image to draw the lines on
+        color_warp = np.zeros_like(image).astype(np.uint8)
+
+        # Recast the x and y points into usable format for cv2.fillPoly()
+        pts_left = np.array([np.transpose(np.vstack([fit_x[0], plot_y]))])
+        pts_right = np.array([np.flipud(np.transpose(np.vstack([fit_x[1], plot_y])))])
+        pts = np.hstack((pts_left, pts_right))
+        pts = np.squeeze(pts)
+        pts = np.expand_dims(pts, 1)
+
+        # Draw the lane onto the warped blank image
+        cv2.fillPoly(color_warp, np.int_([pts]), (0, 255, 0))
+
+        # Warp the blank back to original image space using inverse perspective matrix (Minv)
+        newwarp = cv2.warpPerspective(color_warp, self._M, (color_warp.shape[1], color_warp.shape[0]),
+                                      flags=cv2.WARP_INVERSE_MAP)
+        # Combine the result with the original image
+        result = cv2.addWeighted(image, 1, newwarp, 0.3, 0)
+
+        return result
+
+    def overlay_thresholded(self, image):
+        thresholded_color = cv2.merge((self._thresholded, self._thresholded, self._thresholded))
+        with_thresholded = cv2.addWeighted(image, 1, thresholded_color, 0.5, 0)
+        return with_thresholded
+
     def overlay_additional_info(self, image, frame_n):
-        to_print = 'Frame# {:d}'.format(frame_n)
+
+        radiuses = []
+        for lane_line in self._lane_lines:
+            _, radius = lane_line.get_curvature()
+            radiuses.append(radius)
+        lane_width = get_lane_width(self._lane_lines[0], self._lane_lines[1], image.shape[1])* self._mx
+        to_print = 'Frame# {:d} - Curvature r., L={:5.0f}m R={:5.0f}m - Lane width={:1.1f}m'.format(frame_n, *radiuses, lane_width)
         text_color = (51, 153, 255)
         cv2.putText(image, to_print, (0, 50), self._font, 1, text_color, 2, cv2.LINE_AA)
         return image
@@ -511,12 +590,13 @@ class ImageProcessing:
     def process_frame(self, frame, frame_n):
         self._unprocessed = frame
         self.invalidate()
-        top_view = self.get_top_view()
-        thresholded = self.get_thresholded()
+        self.get_top_view()
+        self.get_thresholded()
         self.position_windows()
         self.fit_lane_lines()
-        thresholded_color = cv2.merge((thresholded, thresholded, thresholded))
-        with_windows = self.overlay_windows(thresholded_color)
+        frame_with_lane = self.overlay_lanes_in_perspective(frame)
+        with_thresholded = self.overlay_thresholded(frame_with_lane)
+        with_windows = self.overlay_windows(with_thresholded)
         with_lane_line = self.overlay_lane_lines(with_windows)
         with_text = self.overlay_additional_info(with_lane_line, frame_n)
         return with_text
