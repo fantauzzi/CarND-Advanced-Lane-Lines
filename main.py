@@ -9,7 +9,9 @@ import copy
 import matplotlib.gridspec as gridspec
 from matplotlib.widgets import Slider, RadioButtons
 from scipy.signal import gaussian
-from enum import IntEnum
+from sklearn import linear_model
+from sklearn.preprocessing import PolynomialFeatures
+from sklearn.pipeline import make_pipeline
 
 
 def switch_RGB(img):
@@ -153,7 +155,16 @@ def window_mask(width, height, img_ref, center, band):
 
 
 def measure_curvature(coefficients, y0, mx, my):
-    # TODO move these parameters where they belong
+    """
+    Finds the curvature radius and centre of curvature, in meters, for the given parabola, at the given point.
+    :param coefficients: the parabola coefficients, i.e. [a, b, c] where x=a*y**2+b*y+c. The parabola is assumed
+    to be in a reference system in pixels.
+    :param y0: the y coordinate, in pixels, of the point along the parabola where the curvature is to be computed.
+    :param mx: scale for the x-axis, in meters/pixel (i.e. one pixel along the x-axis corresponds to `mx` meter).
+    :param my: scale for the y-axis, in meters/pixel (i.e. one pixel along the x-axis corresponds to `my` meter).
+    :return: `((X1, Y1), radius)` where `(X1, Y1)` are the coordinates of the curvature centre, and `radius` is the 
+    curvature radius. All returned values are in meters.
+    """
 
     a = mx / (my ** 2) * coefficients[0]
     b = mx / my * coefficients[1]
@@ -163,14 +174,13 @@ def measure_curvature(coefficients, y0, mx, my):
     radius = ((1 + (2 * a * Y0 + b) ** 2) ** 1.5) / (2 * a)
 
     '''
-    x0 = coefficients_cr[0] * (y0 ** 2) + coefficients_cr[1] * y0 + coefficients_cr[2]
+    X0 = a * (y0 ** 2) + b * y0 + c
 
-    m = -2 * coefficients_cr[0]
-    x1 = x0 + m * ((1 + m ** 2) ** .5) / curve_rad
-    y1 = y0 + curve_rad / ((1 + m ** 2) ** .5)
+    m = -2 * a
+    X1 = X0 + m * ((1 + m ** 2) ** .5) / radius
+    Y1 = Y0 + radius / ((1 + m ** 2) ** .5)
     '''
 
-    # return (x1, y1), curve_rad
     return (None, None), radius
 
 
@@ -230,6 +240,26 @@ class LaneLine:
         based on current `_centroids`, with a parabola; smooths the parabola with those previously found, and stores
         its coefficients in `_coefficients`.
         """
+
+        def fit_RANSAC(x, Y):
+            estimator = linear_model.RANSACRegressor(base_estimator=linear_model.LinearRegression(), min_samples=2,
+                                                     random_state=2111970)
+            # The Scikit pipeline is not strictly necessary for least means-square linear interpolation, but it makes it
+            # easier to replace the estimator used, and change the degree of the polynomial approximation
+            model = make_pipeline(PolynomialFeatures(2), estimator)
+            model.fit(x.reshape(-1, 1), Y)
+            y0=model.predict([[-1]])[0]
+            y1=model.predict([[0]])[0]
+            y2=model.predict([[1]])[0]
+            a=y0+(y2-y0)/2-y1
+            b=(y2-y0)/2
+            c=y1
+            return np.array([a, b, c])
+
+        def fit_least_square(x, Y):
+            coefficients = np.polyfit(x, Y, 2)
+            return coefficients
+
         lane_points = np.zeros_like(thresholded)
 
         # Go through each band and draw into `lane_points` all points from `thresholded` that are in any sliding window
@@ -241,7 +271,8 @@ class LaneLine:
         # Fit points believed to belong to lane line markers by interpolation
         point_coords = np.where(lane_points == 255)
         if len(point_coords[0]) > 0:
-            coefficients = np.polyfit(point_coords[0], point_coords[1], 2)
+            # coefficients = np.polyfit(point_coords[0], point_coords[1], 2)
+            coefficients = fit_least_square(point_coords[0], point_coords[1])
             # Do the smoothing
             if self._smoothing_coefficients is None:
                 self._smoothing_coefficients = coefficients
@@ -581,7 +612,8 @@ class ImageProcessing:
         for lane_line in self._lane_lines:
             _, radius = lane_line.get_curvature()
             radiuses.append(radius)
-        lane_width = get_lane_width(self._lane_lines[0], self._lane_lines[1], image.shape[1])* self._mx
+        # 688 here below comes out of get_top_view() TODO parametrize properly
+        lane_width = get_lane_width(self._lane_lines[0], self._lane_lines[1], 688)* self._mx
         to_print = 'Frame# {:d} - Curvature r., L={:5.0f}m R={:5.0f}m - Lane width={:1.1f}m'.format(frame_n, *radiuses, lane_width)
         text_color = (51, 153, 255)
         cv2.putText(image, to_print, (0, 50), self._font, 1, text_color, 2, cv2.LINE_AA)
@@ -603,8 +635,8 @@ class ImageProcessing:
 
 
 if __name__ == '__main__':
-    input_fname = 'project_video.mp4'
-    # input_fname = 'challenge_video.mp4'
+    # input_fname = 'project_video.mp4'
+    input_fname = 'challenge_video.mp4'
     output_dir = 'output_images'  # TODO use command line parameters instead
     # Directory containing images for caliration
     calibration_dir = 'camera_cal'
@@ -649,3 +681,10 @@ if __name__ == '__main__':
             pass
 
     print('\nProcessing rate {:.1f} fps'.format(frame_counter / (time.time() - start_time)))
+
+# TODO
+'''
+evaluate goodness of interpolated lanes
+improve masking for video 2
+tune sliding window parameter
+'''
