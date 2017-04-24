@@ -139,6 +139,40 @@ class Centroid:
     def __init__(self, x, goodness):
         self.x = x
         self.goodness = goodness
+        self._min_goodness = 1
+
+    def is_good(self):
+        return self.goodness >= self._min_goodness
+
+
+def window_mask(width, height, img_ref, center, band):
+    output = np.zeros_like(img_ref)
+    output[int(img_ref.shape[0] - (band + 1) * height):int(img_ref.shape[0] - band * height),
+    max(0, int(center - width / 2)):min(int(center + width / 2), img_ref.shape[1])] = 1
+    return output
+
+
+def measure_curvature(y, x):
+    # TODO move these parameters where they belong
+    ym_per_pix = 3.48 / 93  # meters per pixel in y dimension
+    xm_per_pix = 3.66 / 748  # meters per pixel in x dimension
+
+    # Fit new polynomials to x,y in world space
+    coefficients_cr = np.polyfit(y * ym_per_pix, x * xm_per_pix, 2)
+    # Calculate the new radii of curvature
+    y0 = np.max(y)
+    curve_rad = (
+                    (1 + (
+                        2 * coefficients_cr[0] * np.max(y) * ym_per_pix + coefficients_cr[1]) ** 2) ** 1.5) / (
+                    2 * coefficients_cr[0])
+
+    x0 = coefficients_cr[0] * (y0 ** 2) + coefficients_cr[1] * y0 + coefficients_cr[2]
+
+    m = -2 * coefficients_cr[0]
+    x1 = x0 + m * ((1 + m ** 2) ** .5) / curve_rad
+    y1 = y0 + curve_rad / ((1 + m ** 2) ** .5)
+
+    return (x1, y1), curve_rad
 
 
 class LaneLine:
@@ -149,9 +183,19 @@ class LaneLine:
         self._n_bands = image_shape[0] // windows_shape[0]
         self._centroids = np.array([None] * self._n_bands)
         self._bottom_x = None
+        self._coefficients = None
+        self._smoothing_coefficients = None
+        self._curvature_center = None
+        self._curvature_radius = None
 
-    def get_centroid_x(self, band):
-        return self._centroids[band].x if self._centroids[band] is not None else None
+        # Parameters, tune carefully
+        self._smoothing = .5
+
+    def get_coefficients(self):
+        return tuple(self._coefficients)
+
+    def get_centroid(self, band):
+        return self._centroids[band]
 
     def get_centroids(self):
         return copy.deepcopy(self._centroids)
@@ -170,12 +214,45 @@ class LaneLine:
         index, offset = self.get_recenter_roi(thresholded)
         area_sum = np.sum(thresholded[index], axis=0)
         # self._bottom_x = np.argmax(np.convolve(filter, area_sum)) - self._windows_shape[1] / 2 + offset
-        self._bottom_x = np.argmax(np.convolve(filter, area_sum, mode='same')) + offset
+        convolution = np.convolve(filter, area_sum, mode='same')
+        if np.max(convolution) > 0:
+            self._bottom_x = np.argmax(convolution) + offset
+        elif self._bottom_x is None:
+            self._bottom_x = offset + self._image_shape[1] / 4
         return self._bottom_x
-
 
     def set_centroids(self, centroids):
         self._centroids = copy.deepcopy(centroids)
+
+    def fit(self, thresholded):
+        """
+        Interpolates the points in `thresholded` that are believed to belong to the lane line,
+        based on current `_centroids`, with a parabola; smooths the parabola with those previously found, and stores
+        its coefficients in `_coefficients`.
+        """
+        lane_points = np.zeros_like(thresholded)
+
+        # Go through each band and draw into `lane_points` all points from `thresholded` that are in any sliding window
+        for band, centroid in enumerate(self._centroids):
+            if centroid.is_good():
+                mask = window_mask(self._windows_shape[1], self._windows_shape[0], thresholded, centroid.x, band)
+                lane_points[(mask == 1) & (thresholded == 255)] = 255
+
+        # Fit points believed to belong to lane line markers by interpolation
+        point_coords = np.where(lane_points == 255)
+        if len(point_coords[0]) > 0:
+            coefficients = np.polyfit(point_coords[0], point_coords[1], 2)
+            # Do the smoothing
+            if self._smoothing_coefficients is None:
+                self._smoothing_coefficients = coefficients
+                self._coefficients = coefficients
+            else:
+                self._coefficients = (1 - self._smoothing) * coefficients + self._smoothing * \
+                                                                            self._smoothing_coefficients
+                # new_smoothing_coefficients[side] = self.coefficients[side]
+                self._smoothing_coefficients = coefficients
+            # Measure and store the curvature radius and center of curvature
+            self._curvature_center, self._curvature_radius = measure_curvature(point_coords[0], point_coords[1])
 
 
 class LeftLaneLine(LaneLine):
@@ -208,14 +285,15 @@ class ImageProcessing:
     def __init__(self):
         self._unprocessed = None
         self._lane_lines = None
+        self._plot_y = None
         self.invalidate()
         # Computation parameters, tune with care
         # TODO give them beter names and document them
-        self.min_goodness = 1
         self.centroid_window_width = 100
         self.centroid_window_height = 80
         self.centroid_window_margin = 75
         self.filter = gaussian(self.centroid_window_width, std=self.centroid_window_width / 8, sym=True)
+        self._font = cv2.FONT_HERSHEY_SIMPLEX
 
     def invalidate(self):
         self._top_view = None
@@ -332,7 +410,7 @@ class ImageProcessing:
                     ''' Special treatement for band 0, at the bottom of the image. If you don't already have a window
                     in that band where to look for lane lines (from previous frames), then determine it staring from the
                     hystogram of the left or right bottom quarter of the image (left or right, depending on which lane). '''
-                    if lane_line.get_centroid_x(0) is None:
+                    if lane_line.get_centroid(0) is None or not lane_line.get_centroid(0).is_good():
                         print('Recentering lane', lane_line.get_printable_name())
                         lane_line.recenter(self._thresholded, self.filter)
                     starting_x = lane_line.get_bottom_x()
@@ -340,7 +418,7 @@ class ImageProcessing:
                     ''' For other bands different from the bottom one, find the first window (from the top) in a band below,
                     and use the x of its centroid as teh starting x for the window'''
                     for band_below in range(band - 1, -1, -1):
-                        if lane_centroids_x[band_below] is not None and lane_centroids_x[band_below].goodness >= self.min_goodness:
+                        if lane_centroids_x[band_below] is not None and lane_centroids_x[band_below].is_good():
                             starting_x = lane_centroids_x[band_below].x
                             break
                     else:
@@ -355,7 +433,7 @@ class ImageProcessing:
                 # Compute the x coordinate of the centroid of the window that contains lane line points
                 # centroid_x = np.argmax(convolved_bands[band][min_index:max_index]) + min_index - offset
                 centroid_x = np.argmax(convolved_bands[band][min_index:max_index]) + min_index
-                goodness = np.max(convolved_bands[band][min_index:max_index])
+                goodness = np.sum(convolved_bands[band][min_index:max_index])
                 # Update the list of centroid x coordinates with what just found for the current lane line and band
                 lane_centroids_x.append(Centroid(centroid_x, goodness))
             new_centroids_x.append(lane_centroids_x)
@@ -364,8 +442,19 @@ class ImageProcessing:
         for lane_line, centroids in zip(self._lane_lines, new_centroids_x):
             lane_line.set_centroids(centroids)
 
-    def get_lanes(self):
-        pass
+    def fit_lane_lines(self):
+        ''' Number in interval [0, 1), governs the smoothing of interpolated lane lines; closer to 1 is smoother, closer
+        to 0 is jerkier; if set to 0, there is no interpolation. '''
+        window_width = self.centroid_window_width
+        window_height = self.centroid_window_height  # Break image into 9 vertical layers since image height is 720
+        assert self._thresholded.shape[0] % window_height == 0
+        margin = self.centroid_window_margin  # How much to slide left and right for searching
+        # A list of pairs, each pair is the x coordinates for a left and right centroid
+
+        # Points used to draw all the left and right windows
+
+        for lane_line in self._lane_lines:
+            lane_line.fit(self._thresholded)
 
     def overlay_windows(self, image):
         # Draw the sliding windows
@@ -376,35 +465,66 @@ class ImageProcessing:
                 if centroid is not None:
                     rect_x0 = int(centroid.x) - self.centroid_window_width // 2
                     rect_y0 = self.centroid_window_height * (len(centroids) - band) - 1
-                    rect_color = (0, 255, 0) if centroid.goodness >= self.min_goodness else (0, 0, 255)
+                    rect_color = (0, 255, 0) if centroid.is_good() else (0, 0, 255)
                     image_with_overlay = cv2.rectangle(image,
-                                                       (rect_x0,rect_y0),
-                                                       (rect_x0 + self.centroid_window_width, rect_y0- self.centroid_window_height),
+                                                       (rect_x0, rect_y0),
+                                                       (rect_x0 + self.centroid_window_width,
+                                                        rect_y0 - self.centroid_window_height),
                                                        color=rect_color)
                     text_color = (255, 255, 255)
                     font = cv2.FONT_HERSHEY_SIMPLEX
                     gap_x = 10
                     gap_y = 30
                     cv2.putText(image_with_overlay, "{:.1f}".format(centroid.goodness),
-                                (rect_x0 + self.centroid_window_width + gap_x, rect_y0 - gap_y), font, .5, text_color, 1,
+                                (rect_x0 + self.centroid_window_width + gap_x, rect_y0 - gap_y), font, .5, text_color,
+                                1,
                                 cv2.LINE_AA)
 
         return image_with_overlay if image_with_overlay is not None else image
 
-    def process_frame(self, frame):
+    def overlay_lane_lines(self, image):
+        assert self._lane_lines is not None
+        if self._plot_y is None:
+            self._plot_y = np.linspace(0, image.shape[0] - 1, image.shape[0])
+
+        image_with_lane_lines = image
+        for lane_line in self._lane_lines:
+            coefficients = lane_line.get_coefficients()
+            if coefficients is None:
+                continue
+            fit_x = coefficients[0] * self._plot_y ** 2 + coefficients[1] * self._plot_y + coefficients[2]
+            # Get the formato for fit_x and self._plot_y that cv2.polylines demands
+            fit_points = np.array((fit_x, self._plot_y), np.int32).T.reshape((-1, 1, 2))
+            image_with_lane_lines = cv2.polylines(image_with_lane_lines,
+                                                  [fit_points],
+                                                  False,
+                                                  (255, 0, 255),
+                                                  thickness=3)
+        return image_with_lane_lines
+
+    def overlay_additional_info(self, image, frame_n):
+        to_print = 'Frame# {:d}'.format(frame_n)
+        text_color = (51, 153, 255)
+        cv2.putText(image, to_print, (0, 50), self._font, 1, text_color, 2, cv2.LINE_AA)
+        return image
+
+    def process_frame(self, frame, frame_n):
         self._unprocessed = frame
         self.invalidate()
         top_view = self.get_top_view()
         thresholded = self.get_thresholded()
         self.position_windows()
+        self.fit_lane_lines()
         thresholded_color = cv2.merge((thresholded, thresholded, thresholded))
         with_windows = self.overlay_windows(thresholded_color)
-        return with_windows
+        with_lane_line = self.overlay_lane_lines(with_windows)
+        with_text = self.overlay_additional_info(with_lane_line, frame_n)
+        return with_text
 
 
 if __name__ == '__main__':
-    # input_fname = 'project_video.mp4'
-    input_fname = 'challenge_video.mp4'
+    input_fname = 'project_video.mp4'
+    # input_fname = 'challenge_video.mp4'
     output_dir = 'output_images'  # TODO use command line parameters instead
     # Directory containing images for caliration
     calibration_dir = 'camera_cal'
@@ -434,8 +554,6 @@ if __name__ == '__main__':
     # vidcap.set(cv2.CAP_PROP_POS_MSEC, 6000)
     start_time = time.time()
 
-    '''plt.ion()
-    ax = None'''
     processor = ImageProcessing()
     while (True):  # TODO consider to move it to an OpenCV loop
         read, frame = vidcap.read()
@@ -445,15 +563,8 @@ if __name__ == '__main__':
         print('Processing frame', frame_counter)
         # Un-distort it applying camera calibration
         undistorted_img = undistort_image(frame, mtx, dist, roi)
-        processed = processor.process_frame(undistorted_img)
+        processed = processor.process_frame(undistorted_img, frame_counter)
         vidwrite.write(processed)
-        '''assert processed.shape == (720, 1280, 3)
-        if frame_counter == 1:
-            ax = plt.imshow(processed)
-        else:
-            ax.set_data(processed)
-            plt.draw()
-        plt.pause(0.001)'''
         if frame_counter % 100 == 0:
             pass
 
