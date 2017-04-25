@@ -114,6 +114,20 @@ def find_gradient(gscale_image):
     grad_dir = np.abs(np.arctan2(sobel_y, sobel_x))
     return grad_size, grad_dir
 
+def find_gradient(gscale_img):
+    """
+    Returns the gradient modulus and direction absolute value for the given grayscale image.
+    Modulus is scaled to be in the range of integers [0, 255], direction to be in the real numbers interval
+    [0, Pi]
+    """
+    sobel_x = cv2.Sobel(gscale_img, cv2.CV_64F, 1, 0, ksize=5)
+    sobel_y = cv2.Sobel(gscale_img, cv2.CV_64F, 0, 1, ksize=5)
+    grad_size = (sobel_x ** 2 + sobel_y ** 2) ** .5
+    max_grad_size = np.max(grad_size)
+    grad_size = np.uint8(grad_size / max_grad_size * 255)
+    grad_dir = np.abs(np.arctan2(sobel_y, sobel_x))
+    return grad_size, grad_dir
+
 
 def find_x_gradient(gscale_image):
     """
@@ -196,7 +210,8 @@ class LaneLine:
         self._smoothing_coefficients = None
         self._curvature_center = None
         self._curvature_radius = None
-        self._scale = scale
+        self._scale = scale  # [mx, my]
+        self._is_unreliable = None
 
         # Parameters, tune carefully
         self._smoothing = .5
@@ -219,6 +234,9 @@ class LaneLine:
     def get_printable_name(self):
         raise NotImplementedError
 
+    def is_unreliable(self):
+        return self._is_unreliable
+
     def recenter(self, thresholded, filter):
         assert thresholded.shape == self._image_shape
         index, offset = self.get_recenter_roi(thresholded)
@@ -234,6 +252,29 @@ class LaneLine:
     def set_centroids(self, centroids):
         self._centroids = copy.deepcopy(centroids)
 
+    def check_reliability(self):
+        if abs(self._curvature_radius) < 50:
+            self._is_unreliable = True
+        good_centroids_count = sum(centroid.is_good() for centroid in self._centroids)
+        if good_centroids_count < 2:
+            self._is_unreliable = True
+        return self._is_unreliable
+
+    def check_reliability_against(self, lane_line):
+        if abs(self._curvature_radius) + abs(
+                lane_line._curvature_radius) < 1200 and self._curvature_radius / lane_line._curvature_radius < 0:
+            self._is_unreliable = True
+            lane_line._is_unreliable = True
+        distance = get_lane_width(self, lane_line, 688)* self._scale[0]  # TODO remove this stinking hard-wiring
+        if distance < 2:
+            # TODO this doesn't relly work, fix it!
+            center = self._image_shape[1]/2
+            if abs(self._bottom_x - center) < abs(lane_line._bottom_x - center):
+                self._is_unreliable = True
+            else:
+                lane_line._is_unreliable = True
+
+
     def fit(self, thresholded):
         """
         Interpolates the points in `thresholded` that are believed to belong to the lane line,
@@ -248,12 +289,12 @@ class LaneLine:
             # easier to replace the estimator used, and change the degree of the polynomial approximation
             model = make_pipeline(PolynomialFeatures(2), estimator)
             model.fit(x.reshape(-1, 1), Y)
-            y0=model.predict([[-1]])[0]
-            y1=model.predict([[0]])[0]
-            y2=model.predict([[1]])[0]
-            a=y0+(y2-y0)/2-y1
-            b=(y2-y0)/2
-            c=y1
+            y0 = model.predict([[-1]])[0]
+            y1 = model.predict([[0]])[0]
+            y2 = model.predict([[1]])[0]
+            a = y0 + (y2 - y0) / 2 - y1
+            b = (y2 - y0) / 2
+            c = y1
             return np.array([a, b, c])
 
         def fit_least_square(x, Y):
@@ -284,10 +325,15 @@ class LaneLine:
                 self._smoothing_coefficients = coefficients
             # Measure and store the curvature radius and center of curvature
             # self._curvature_center, self._curvature_radius = measure_curvature(point_coords[0], point_coords[1])
-            self._curvature_center, self._curvature_radius = measure_curvature(self._coefficients, thresholded.shape[0]-1, self._scale[0], self._scale[1])
+            self._curvature_center, self._curvature_radius = measure_curvature(self._coefficients,
+                                                                               thresholded.shape[0] - 1, self._scale[0],
+                                                                               self._scale[1])
+            self._is_unreliable = False
+            self.check_reliability()
 
     def get_curvature(self):
         return self._curvature_center, self._curvature_radius
+
 
 class LeftLaneLine(LaneLine):
     # def __init__(self):
@@ -326,9 +372,9 @@ def get_lane_width(lane_line1, lane_line2, y):
     coefficients2 = lane_line2.get_coefficients()
     if coefficients2 is None:
         return None
-    x1= coefficients1[0]*(y**2)+coefficients1[1]*y+coefficients1[2]
+    x1 = coefficients1[0] * (y ** 2) + coefficients1[1] * y + coefficients1[2]
     x2 = coefficients2[0] * (y ** 2) + coefficients2[1] * y + coefficients2[2]
-    return abs(x1-x2)
+    return abs(x1 - x2)
 
 
 class ImageProcessing:
@@ -405,15 +451,18 @@ class ImageProcessing:
     def get_thresholded(self):
         if self._thresholded is None:
             assert self._top_view is not None
-            # TODO optimise the masks
             masks = (((0, 100, 100), (50, 255, 255)),
                      ((18, 0, 180), (255, 80, 255)),
-                     ((4, 0, 180), (15, 80, 255)))
-            min_grad_size = 15
+                     ((4, 0, 180), (15, 80, 255)),
+                     ((15, 15, 100), (25, 150, 255)))
+
+            min_grad_size = 10  # TODO make it a parameter
+            # max_grad_dir = math.pi /3
             hsv = cv2.cvtColor(self._top_view, cv2.COLOR_BGR2HSV)
             thresholded = np.zeros_like(hsv[:, :, 0])
             MIN, MAX = 0, 1
             H, S, V = 0, 1, 2
+            # grad_size = find_x_gradient(hsv[:, :, 2])
             grad_size = find_x_gradient(hsv[:, :, 2])
             for mask in masks:
                 thresholded[(mask[MIN][H] <= hsv[:, :, H]) &
@@ -434,7 +483,8 @@ class ImageProcessing:
         """
         assert self._thresholded is not None
         if self._lane_lines is None:
-            args = ((self.centroid_window_height, self.centroid_window_width), self._thresholded.shape, (self._mx, self._my))
+            args = (
+            (self.centroid_window_height, self.centroid_window_width), self._thresholded.shape, (self._mx, self._my))
             self._lane_lines = [LeftLaneLine(*args), RightLaneLine(*args)]
         assert self._thresholded.shape[0] % self.centroid_window_height == 0
         n_bands = self._thresholded.shape[0] // self.centroid_window_height
@@ -497,18 +547,12 @@ class ImageProcessing:
             lane_line.set_centroids(centroids)
 
     def fit_lane_lines(self):
-        ''' Number in interval [0, 1), governs the smoothing of interpolated lane lines; closer to 1 is smoother, closer
-        to 0 is jerkier; if set to 0, there is no interpolation. '''
-        window_width = self.centroid_window_width
-        window_height = self.centroid_window_height  # Break image into 9 vertical layers since image height is 720
-        assert self._thresholded.shape[0] % window_height == 0
-        margin = self.centroid_window_margin  # How much to slide left and right for searching
-        # A list of pairs, each pair is the x coordinates for a left and right centroid
-
-        # Points used to draw all the left and right windows
-
         for lane_line in self._lane_lines:
             lane_line.fit(self._thresholded)
+
+        self._lane_lines[0].check_reliability_against(self._lane_lines[1])
+
+        # 688 here below comes out of get_top_view() TODO parametrize properly
 
     def overlay_windows(self, image):
         # Draw the sliding windows
@@ -554,13 +598,14 @@ class ImageProcessing:
 
         image_with_lane_lines = image
         plot_y, lanes_points = self.get_lanes_points(image.shape[0])
-        for lane_points in lanes_points:
+        for lane_points, lane_line in zip(lanes_points, self._lane_lines):
             # Get the formato for fit_x and self._plot_y that cv2.polylines demands
             fit_points = np.array((lane_points, plot_y), np.int32).T.reshape((-1, 1, 2))
+            color = (0, 0, 255) if lane_line.is_unreliable() else (255, 0, 255)
             image_with_lane_lines = cv2.polylines(image_with_lane_lines,
                                                   [fit_points],
                                                   False,
-                                                  (255, 0, 255),
+                                                  (color),
                                                   thickness=3)
         return image_with_lane_lines
 
@@ -613,9 +658,10 @@ class ImageProcessing:
             _, radius = lane_line.get_curvature()
             radiuses.append(radius)
         # 688 here below comes out of get_top_view() TODO parametrize properly
-        lane_width = get_lane_width(self._lane_lines[0], self._lane_lines[1], 688)* self._mx
-        to_print = 'Frame# {:d} - Curvature r., L={:5.0f}m R={:5.0f}m - Lane width={:1.1f}m'.format(frame_n, *radiuses, lane_width)
-        text_color = (51, 153, 255)
+        lane_width = get_lane_width(self._lane_lines[0], self._lane_lines[1], 688) * self._mx
+        to_print = 'Frame# {:d} - Curvature r., L={:5.0f}m R={:5.0f}m - Lane width={:1.1f}m'.format(frame_n, *radiuses,
+                                                                                                    lane_width)
+        text_color = (0, 0, 128)
         cv2.putText(image, to_print, (0, 50), self._font, 1, text_color, 2, cv2.LINE_AA)
         return image
 
@@ -635,7 +681,7 @@ class ImageProcessing:
 
 
 if __name__ == '__main__':
-    # input_fname = 'project_video.mp4'
+    #input_fname = 'project_video.mp4'
     input_fname = 'challenge_video.mp4'
     output_dir = 'output_images'  # TODO use command line parameters instead
     # Directory containing images for caliration
