@@ -114,6 +114,7 @@ def find_gradient(gscale_image):
     grad_dir = np.abs(np.arctan2(sobel_y, sobel_x))
     return grad_size, grad_dir
 
+
 def find_gradient(gscale_img):
     """
     Returns the gradient modulus and direction absolute value for the given grayscale image.
@@ -204,14 +205,16 @@ class LaneLine:
         self._image_shape = image_shape
         assert image_shape[0] % windows_shape[0] == 0
         self._n_bands = image_shape[0] // windows_shape[0]
+        self._scale = scale  # [mx, my]
+
         self._centroids = np.array([None] * self._n_bands)
         self._bottom_x = None
         self._coefficients = None
         self._smoothing_coefficients = None
         self._curvature_center = None
         self._curvature_radius = None
-        self._scale = scale  # [mx, my]
         self._is_unreliable = None
+        self._fit_undone = None
 
         # Parameters, tune carefully
         self._smoothing = .5
@@ -261,19 +264,41 @@ class LaneLine:
         return self._is_unreliable
 
     def check_reliability_against(self, lane_line):
+        """
+        Check the reliability of two interpolated lane lines against each other, i.e. verify if they are consistent
+        with each other. The `self` lane line is checked against the given one.
+        """
+
+        ''' If either lane line is unreliable already, they don't give a good basis to check for their consistency with
+        each other, just return '''
+        #if self._is_unreliable or lane_line._is_unreliable:
+        #    return
+
+        ''' If both lane lines have a small enough curvature radius, we can assume car is along a curve; in that
+        case, the two lane lines must curve the same direction (radius of curvature must have the same sign) '''
         if abs(self._curvature_radius) + abs(
                 lane_line._curvature_radius) < 1200 and self._curvature_radius / lane_line._curvature_radius < 0:
             self._is_unreliable = True
             lane_line._is_unreliable = True
-        distance = get_lane_width(self, lane_line, 688)* self._scale[0]  # TODO remove this stinking hard-wiring
-        if distance < 2:
-            # TODO this doesn't relly work, fix it!
-            center = self._image_shape[1]/2
-            if abs(self._bottom_x - center) < abs(lane_line._bottom_x - center):
-                self._is_unreliable = True
-            else:
-                lane_line._is_unreliable = True
+            return
 
+        ''' If the lane is too narrow at the bottom of the image (where the car is)... '''
+        x1, x2 = get_bottom_lane_lines_position(self, lane_line, 688)  # TODO remove this stinking hard-wiring
+        if abs(x1 - x2) * self._scale[0] < 2:  # TODO hardwiring
+            # ... keep good the lane that is the closest to the respective side
+            if abs(x1) < abs(self._image_shape[1] - x2):
+                lane_line._is_unreliable = True
+            else:
+                self._is_unreliable = True
+        elif abs(x1-x2)* self._scale[0] > 4.05:  # TODO hardwiring
+            ''' If the lane is too wide at the bottom of the image, mark both lane lines as bad'''
+            self._is_unreliable = lane_line._is_unreliable = True
+            return
+
+        ''' if the lane is too narrow a the top, then mark both lane lines as unreliable'''
+        top_dist = get_lane_width(self, lane_line, 360)* self._scale[0]
+        if top_dist < 2 or top_dist > 5:
+            self._is_unreliable = lane_line._is_unreliable = True
 
     def fit(self, thresholded):
         """
@@ -329,7 +354,8 @@ class LaneLine:
                                                                                thresholded.shape[0] - 1, self._scale[0],
                                                                                self._scale[1])
             self._is_unreliable = False
-            self.check_reliability()
+            self._fit_undone = False
+            reliable = self.check_reliability()
 
     def get_curvature(self):
         return self._curvature_center, self._curvature_radius
@@ -366,21 +392,32 @@ def get_lane_width(lane_line1, lane_line2, y):
     Returns the distance in pixels between the two lane lines as displayed in a top view, taken horizontally
     at the given y coordinate
     """
+    x1, x2 = get_bottom_lane_lines_position(lane_line1, lane_line2, y)
+    return abs(x1 - x2)
+
+
+def get_bottom_lane_lines_position(lane_line1, lane_line2, y):
+    """
+    Returns the x values of the interpolated lane lines for the given `y` 
+    """
     coefficients1 = lane_line1.get_coefficients()
     if coefficients1 is None:
         return None
     coefficients2 = lane_line2.get_coefficients()
     if coefficients2 is None:
         return None
+
+    # Could do it fancier, with vector calculus
     x1 = coefficients1[0] * (y ** 2) + coefficients1[1] * y + coefficients1[2]
     x2 = coefficients2[0] * (y ** 2) + coefficients2[1] * y + coefficients2[2]
-    return abs(x1 - x2)
+    return x1, x2
 
 
 class ImageProcessing:
     def __init__(self):
         self._unprocessed = None
         self._lane_lines = None
+        self._prev_lane_lines = None
         self._plot_y = None
         self._M = None
         self.invalidate()
@@ -390,7 +427,7 @@ class ImageProcessing:
         self._my = 3.48 / 93  # meters per pixel in y dimension
         self.centroid_window_width = 100
         self.centroid_window_height = 80
-        self.centroid_window_margin = 75  # TODO tune this!
+        self.centroid_window_margin = 100  # TODO tune this!
         self.filter = gaussian(self.centroid_window_width, std=self.centroid_window_width / 8, sym=True)
         self._font = cv2.FONT_HERSHEY_SIMPLEX
 
@@ -484,7 +521,8 @@ class ImageProcessing:
         assert self._thresholded is not None
         if self._lane_lines is None:
             args = (
-            (self.centroid_window_height, self.centroid_window_width), self._thresholded.shape, (self._mx, self._my))
+                (self.centroid_window_height, self.centroid_window_width), self._thresholded.shape,
+                (self._mx, self._my))
             self._lane_lines = [LeftLaneLine(*args), RightLaneLine(*args)]
         assert self._thresholded.shape[0] % self.centroid_window_height == 0
         n_bands = self._thresholded.shape[0] // self.centroid_window_height
@@ -550,9 +588,26 @@ class ImageProcessing:
         for lane_line in self._lane_lines:
             lane_line.fit(self._thresholded)
 
+        if self._prev_lane_lines is None:
+            self._prev_lane_lines = []
+            for lane_line in self._lane_lines:
+                self._prev_lane_lines.append(copy.deepcopy(lane_line))
+        else:
+            for i_lane, lane_line in enumerate(self._lane_lines):
+                if lane_line._is_unreliable:
+                    self._lane_lines[i_lane] = copy.deepcopy(self._prev_lane_lines[i_lane])
+                    self._lane_lines[i_lane]._is_unreliable = True  # TODO change to public method call
+
         self._lane_lines[0].check_reliability_against(self._lane_lines[1])
 
-        # 688 here below comes out of get_top_view() TODO parametrize properly
+        for i_lane, lane_line in enumerate(self._lane_lines):  # TODO redundant
+            if lane_line._is_unreliable:
+                self._lane_lines[i_lane] = copy.deepcopy(self._prev_lane_lines[i_lane])
+                self._lane_lines[i_lane]._is_unreliable = True  # TODO change to public method call
+
+        for i_lane, lane_line in enumerate(self._lane_lines):  # TODO redundant
+            if not lane_line._is_unreliable:
+                self._prev_lane_lines[i_lane] =  copy.deepcopy(lane_line)
 
     def overlay_windows(self, image):
         # Draw the sliding windows
@@ -659,8 +714,9 @@ class ImageProcessing:
             radiuses.append(radius)
         # 688 here below comes out of get_top_view() TODO parametrize properly
         lane_width = get_lane_width(self._lane_lines[0], self._lane_lines[1], 688) * self._mx
-        to_print = 'Frame# {:d} - Curvature r., L={:5.0f}m R={:5.0f}m - Lane width={:1.1f}m'.format(frame_n, *radiuses,
-                                                                                                    lane_width)
+        top_lane_width = get_lane_width(self._lane_lines[0], self._lane_lines[1], 360) * self._mx
+        to_print = 'Frame# {:d} - Curvature r., L={:5.0f}m R={:5.0f}m - Lane w.={:1.1f}m top={:2.1f}m'.format(frame_n, *radiuses,
+                                                                                                    lane_width, top_lane_width)
         text_color = (0, 0, 128)
         cv2.putText(image, to_print, (0, 50), self._font, 1, text_color, 2, cv2.LINE_AA)
         return image
@@ -681,7 +737,7 @@ class ImageProcessing:
 
 
 if __name__ == '__main__':
-    #input_fname = 'project_video.mp4'
+    # input_fname = 'project_video.mp4'
     input_fname = 'challenge_video.mp4'
     output_dir = 'output_images'  # TODO use command line parameters instead
     # Directory containing images for caliration
