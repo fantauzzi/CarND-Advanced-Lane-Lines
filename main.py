@@ -271,15 +271,14 @@ class LaneLine:
 
         ''' If either lane line is unreliable already, they don't give a good basis to check for their consistency with
         each other, just return '''
-        #if self._is_unreliable or lane_line._is_unreliable:
+        # if self._is_unreliable or lane_line._is_unreliable:
         #    return
 
         ''' If both lane lines have a small enough curvature radius, we can assume car is along a curve; in that
         case, the two lane lines must curve the same direction (radius of curvature must have the same sign) '''
         if abs(self._curvature_radius) + abs(
                 lane_line._curvature_radius) < 1200 and self._curvature_radius / lane_line._curvature_radius < 0:
-            self._is_unreliable = True
-            lane_line._is_unreliable = True
+            self._is_unreliable = lane_line._is_unreliable = True
             return
 
         ''' If the lane is too narrow at the bottom of the image (where the car is)... '''
@@ -290,15 +289,25 @@ class LaneLine:
                 lane_line._is_unreliable = True
             else:
                 self._is_unreliable = True
-        elif abs(x1-x2)* self._scale[0] > 4.05:  # TODO hardwiring
+        elif abs(x1 - x2) * self._scale[0] > 4.05:  # TODO hardwiring
             ''' If the lane is too wide at the bottom of the image, mark both lane lines as bad'''
             self._is_unreliable = lane_line._is_unreliable = True
             return
 
+        if abs(self._image_shape[1]-x2)> 550 or x1 > 550:
+            self._is_unreliable = lane_line._is_unreliable = True
+            return
+
         ''' if the lane is too narrow a the top, then mark both lane lines as unreliable'''
-        top_dist = get_lane_width(self, lane_line, 360)* self._scale[0]
+        top_dist = get_lane_width(self, lane_line, 360) * self._scale[0]
         if top_dist < 2 or top_dist > 5:
             self._is_unreliable = lane_line._is_unreliable = True
+            return
+
+        if (abs(self._curvature_radius) < 390 and abs(lane_line._curvature_radius) > 1000) or \
+        (abs(self._curvature_radius) > 1000 and abs(lane_line._curvature_radius) < 390):
+            self._is_unreliable = lane_line._is_unreliable = True
+            return
 
     def fit(self, thresholded):
         """
@@ -607,7 +616,7 @@ class ImageProcessing:
 
         for i_lane, lane_line in enumerate(self._lane_lines):  # TODO redundant
             if not lane_line._is_unreliable:
-                self._prev_lane_lines[i_lane] =  copy.deepcopy(lane_line)
+                self._prev_lane_lines[i_lane] = copy.deepcopy(lane_line)
 
     def overlay_windows(self, image):
         # Draw the sliding windows
@@ -715,8 +724,10 @@ class ImageProcessing:
         # 688 here below comes out of get_top_view() TODO parametrize properly
         lane_width = get_lane_width(self._lane_lines[0], self._lane_lines[1], 688) * self._mx
         top_lane_width = get_lane_width(self._lane_lines[0], self._lane_lines[1], 360) * self._mx
-        to_print = 'Frame# {:d} - Curvature r., L={:5.0f}m R={:5.0f}m - Lane w.={:1.1f}m top={:2.1f}m'.format(frame_n, *radiuses,
-                                                                                                    lane_width, top_lane_width)
+        to_print = 'F# {:d} - Curv. r., L={:5.0f}m R={:5.0f}m - Lane w.={:2.2f}m top={:2.2f}m'.format(frame_n,
+                                                                                                      *radiuses,
+                                                                                                      lane_width,
+                                                                                                      top_lane_width)
         text_color = (0, 0, 128)
         cv2.putText(image, to_print, (0, 50), self._font, 1, text_color, 2, cv2.LINE_AA)
         return image
@@ -738,7 +749,7 @@ class ImageProcessing:
 
 if __name__ == '__main__':
     # input_fname = 'project_video.mp4'
-    input_fname = 'challenge_video.mp4'
+    input_fname = 'harder_challenge_video.mp4'
     output_dir = 'output_images'  # TODO use command line parameters instead
     # Directory containing images for caliration
     calibration_dir = 'camera_cal'
