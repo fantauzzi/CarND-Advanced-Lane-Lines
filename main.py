@@ -6,6 +6,7 @@ import glob
 import math
 import time
 import copy
+import argparse
 import matplotlib.gridspec as gridspec
 from matplotlib.widgets import Slider, RadioButtons
 from scipy.signal import gaussian
@@ -15,26 +16,26 @@ from sklearn.pipeline import make_pipeline
 
 
 def switch_RGB(img):
-    '''
+    """
     Switches between RGB and BGR representation of a color image, and returns the result
-    '''
+    """
     return img[:, :, ::-1]
 
 
 def find_line_params(p0, p1):
-    '''
+    """
     Returns slope and intercept (in that order) of the line going through 2D points `p0` and `p1`.
-    '''
+    """
     m = (p0[1] - p1[1]) / (p0[0] - p1[0])
     q = p0[1] - m * p0[0]
     return m, q
 
 
 def find_intersect(p0, p1, p2, p3):
-    '''
+    """
     Returns the coordinates of the intersection between the line going through `p0` and `p1`, and the line going through
     `p2` and `p3`.
-    '''
+    """
     m = [0, 0]
     q = [0, 0]
     m[0], q[0] = find_line_params(p0, p1)
@@ -45,9 +46,9 @@ def find_intersect(p0, p1, p2, p3):
 
 
 def find_x_given_y(y, p0, p1):
-    '''
-    Returns the value for x for the given `y` along the line passing through points `p0` and `p1`
-    '''
+    """
+    Returns the x value for the given `y` along the line passing through points `p0` and `p1`
+    """
     m, q = find_line_params(p0, p1)
     x = (y - q) / m
     return x
@@ -56,8 +57,9 @@ def find_x_given_y(y, p0, p1):
 def calibrate_camera(calibration_dir, target_size, print_error=True):
     """
     Calibrate a camera using images of the checkered pattern taken with the camera. 
-    :param calibration_dir: the directory containing the input images.  
-    :param target_size: the size of the checkered pattern, a pair as (No_of_columns, No_of_rows).
+    :param calibration_dir: the directory containing the input images in JPEG format.  
+    :param target_size: the size of the checkered pattern, a pair as in (No_of_columns, No_of_rows).
+    :param print_error: if set to True, after calibration the function evaluates and prints its mean error on the input images
     :return: the calibration parameters as returned by cv2.calibrateCamera()
     """
 
@@ -83,6 +85,7 @@ def calibrate_camera(calibration_dir, target_size, print_error=True):
             print("WARNING: couldn't detect calibration pattern in file", f_name)
 
     img_size = (img.shape[1], img.shape[0])
+
     # Do camera calibration given object points and image points
     ret, mtx, dist, rvecs, tvecs = cv2.calibrateCamera(obj_points, img_points, img_size, None, None)
     h, w = img.shape[:2]
@@ -95,34 +98,19 @@ def calibrate_camera(calibration_dir, target_size, print_error=True):
             error = cv2.norm(img_points[i], img_points2, cv2.NORM_L2) / len(img_points2)
             mean_error += error
             assert error >= 0
-        print("Measured calibration error: ", mean_error / len(obj_points))
+        print("Measured calibration mean error: ", mean_error / len(obj_points))
 
     return new_mtx, dist, rvecs, tvecs, roi
 
 
 def find_gradient(gscale_image):
     """
-    Returns the gradient modulus and direction absolute value for the given grayscale image.
-    Modulus is scaled to be in the range of integers [0, 255], direction to be in the real numbers interval
+    Returns the gradient modulus and direction in absolute value for the given grayscale image.
+    Modulus is scaled to be in the range of integers [0, 255]; direction is in the real numbers interval
     [0, Pi]
     """
     sobel_x = cv2.Sobel(gscale_image, cv2.CV_64F, 1, 0, ksize=5)
     sobel_y = cv2.Sobel(gscale_image, cv2.CV_64F, 0, 1, ksize=5)
-    grad_size = (sobel_x ** 2 + sobel_y ** 2) ** .5
-    max_grad_size = np.max(grad_size)
-    grad_size = np.uint8(grad_size / max_grad_size * 255)
-    grad_dir = np.abs(np.arctan2(sobel_y, sobel_x))
-    return grad_size, grad_dir
-
-
-def find_gradient(gscale_img):
-    """
-    Returns the gradient modulus and direction absolute value for the given grayscale image.
-    Modulus is scaled to be in the range of integers [0, 255], direction to be in the real numbers interval
-    [0, Pi]
-    """
-    sobel_x = cv2.Sobel(gscale_img, cv2.CV_64F, 1, 0, ksize=5)
-    sobel_y = cv2.Sobel(gscale_img, cv2.CV_64F, 0, 1, ksize=5)
     grad_size = (sobel_x ** 2 + sobel_y ** 2) ** .5
     max_grad_size = np.max(grad_size)
     grad_size = np.uint8(grad_size / max_grad_size * 255)
@@ -142,24 +130,26 @@ def find_x_gradient(gscale_image):
     return sobel_x
 
 
-def undistort_image(image, mtx, dist, roi):
+def undistort_image(image, mtx, dist, roi=None):
     """
     Returns an undistorted copy of the given image, based on the given camera calilbration parameters
     """
     undistorted_image = cv2.undistort(image, mtx, dist, None, mtx)
-    # x, y, w, h = roi
-    # undistorted_image= undistorted_image[y:y + h, x:x + w]
+    if roi is not None:  # Clipping
+        x, y, w, h = roi
+        undistorted_image = undistorted_image[y:y + h, x:x + w]
     return undistorted_image
 
 
 class Centroid:
+    _min_goodness = 1
+
     def __init__(self, x, goodness):
         self.x = x
         self.goodness = goodness
-        self._min_goodness = 1
 
     def is_good(self):
-        return self.goodness >= self._min_goodness
+        return self.goodness >= Centroid._min_goodness
 
 
 def window_mask(width, height, img_ref, center, band):
@@ -177,8 +167,7 @@ def measure_curvature(coefficients, y0, mx, my):
     :param y0: the y coordinate, in pixels, of the point along the parabola where the curvature is to be computed.
     :param mx: scale for the x-axis, in meters/pixel (i.e. one pixel along the x-axis corresponds to `mx` meter).
     :param my: scale for the y-axis, in meters/pixel (i.e. one pixel along the x-axis corresponds to `my` meter).
-    :return: `((X1, Y1), radius)` where `(X1, Y1)` are the coordinates of the curvature centre, and `radius` is the 
-    curvature radius. All returned values are in meters.
+    :return: the curvature radius in meters.
     """
 
     a = mx / (my ** 2) * coefficients[0]
@@ -188,36 +177,25 @@ def measure_curvature(coefficients, y0, mx, my):
 
     radius = ((1 + (2 * a * Y0 + b) ** 2) ** 1.5) / (2 * a)
 
-    '''
-    X0 = a * (y0 ** 2) + b * y0 + c
-
-    m = -2 * a
-    X1 = X0 + m * ((1 + m ** 2) ** .5) / radius
-    Y1 = Y0 + radius / ((1 + m ** 2) ** .5)
-    '''
-
-    return (None, None), radius
+    return radius
 
 
 class LaneLine:
+    _smoothing = .5
+
     def __init__(self, windows_shape, image_shape, scale):
         self._windows_shape = windows_shape
         self._image_shape = image_shape
         assert image_shape[0] % windows_shape[0] == 0
         self._n_bands = image_shape[0] // windows_shape[0]
         self._scale = scale  # [mx, my]
-
         self._centroids = np.array([None] * self._n_bands)
         self._bottom_x = None
         self._coefficients = None
         self._smoothing_coefficients = None
         self._curvature_center = None
-        self._curvature_radius = None
         self._is_unreliable = None
         self._fit_undone = None
-
-        # Parameters, tune carefully
-        self._smoothing = .5
 
     def get_coefficients(self):
         return tuple(self._coefficients)
@@ -240,11 +218,13 @@ class LaneLine:
     def is_unreliable(self):
         return self._is_unreliable
 
+    def get_curvature(self):
+        return self._curvature_radius
+
     def recenter(self, thresholded, filter):
         assert thresholded.shape == self._image_shape
         index, offset = self.get_recenter_roi(thresholded)
         area_sum = np.sum(thresholded[index], axis=0)
-        # self._bottom_x = np.argmax(np.convolve(filter, area_sum)) - self._windows_shape[1] / 2 + offset
         convolution = np.convolve(filter, area_sum, mode='same')
         if np.max(convolution) > 0:
             self._bottom_x = np.argmax(convolution) + offset
@@ -256,6 +236,10 @@ class LaneLine:
         self._centroids = copy.deepcopy(centroids)
 
     def check_reliability(self):
+        """
+        Checks the reliability of the interpolated lane line, stores the result in `self._is_unreliable` as a boolean
+        and returns it.
+        """
         if abs(self._curvature_radius) < 50:
             self._is_unreliable = True
         good_centroids_count = sum(centroid.is_good() for centroid in self._centroids)
@@ -266,13 +250,8 @@ class LaneLine:
     def check_reliability_against(self, lane_line):
         """
         Check the reliability of two interpolated lane lines against each other, i.e. verify if they are consistent
-        with each other. The `self` lane line is checked against the given one.
+        with each other. The `self` lane line is checked against the given one. Returns the result as a boolean. 
         """
-
-        ''' If either lane line is unreliable already, they don't give a good basis to check for their consistency with
-        each other, just return '''
-        # if self._is_unreliable or lane_line._is_unreliable:
-        #    return
 
         ''' If both lane lines have a small enough curvature radius, we can assume car is along a curve; in that
         case, the two lane lines must curve the same direction (radius of curvature must have the same sign) '''
@@ -282,7 +261,7 @@ class LaneLine:
             return
 
         ''' If the lane is too narrow at the bottom of the image (where the car is)... '''
-        x1, x2 = get_bottom_lane_lines_position(self, lane_line, 688)  # TODO remove this stinking hard-wiring
+        x1, x2 = get_lane_lines_position_at(self, lane_line, 688)  # TODO remove this stinking hard-wiring
         if abs(x1 - x2) * self._scale[0] < 2:  # TODO hardwiring
             # ... keep good the lane that is the closest to the respective side
             if abs(x1) < abs(self._image_shape[1] - x2):
@@ -294,7 +273,7 @@ class LaneLine:
             self._is_unreliable = lane_line._is_unreliable = True
             return
 
-        if abs(self._image_shape[1]-x2)> 550 or x1 > 550:
+        if abs(self._image_shape[1] - x2) > 550 or x1 > 550:
             self._is_unreliable = lane_line._is_unreliable = True
             return
 
@@ -305,7 +284,7 @@ class LaneLine:
             return
 
         if (abs(self._curvature_radius) < 390 and abs(lane_line._curvature_radius) > 1000) or \
-        (abs(self._curvature_radius) > 1000 and abs(lane_line._curvature_radius) < 390):
+                (abs(self._curvature_radius) > 1000 and abs(lane_line._curvature_radius) < 390):
             self._is_unreliable = lane_line._is_unreliable = True
             return
 
@@ -317,6 +296,10 @@ class LaneLine:
         """
 
         def fit_RANSAC(x, Y):
+            """
+            Fits the given points with a parabola using RANSAC, and returns its coefficients [a, b, c], where a is 
+            the highest degree coefficient, c is the lowest.
+            """
             estimator = linear_model.RANSACRegressor(base_estimator=linear_model.LinearRegression(), min_samples=2,
                                                      random_state=2111970)
             # The Scikit pipeline is not strictly necessary for least means-square linear interpolation, but it makes it
@@ -332,6 +315,9 @@ class LaneLine:
             return np.array([a, b, c])
 
         def fit_least_square(x, Y):
+            """
+            Fits the given points with a parabola using least-square interpolation and returns its coefficients.
+            """
             coefficients = np.polyfit(x, Y, 2)
             return coefficients
 
@@ -346,34 +332,26 @@ class LaneLine:
         # Fit points believed to belong to lane line markers by interpolation
         point_coords = np.where(lane_points == 255)
         if len(point_coords[0]) > 0:
-            # coefficients = np.polyfit(point_coords[0], point_coords[1], 2)
             coefficients = fit_least_square(point_coords[0], point_coords[1])
             # Do the smoothing
             if self._smoothing_coefficients is None:
                 self._smoothing_coefficients = coefficients
                 self._coefficients = coefficients
             else:
-                self._coefficients = (1 - self._smoothing) * coefficients + self._smoothing * \
-                                                                            self._smoothing_coefficients
+                self._coefficients = (1 - LaneLine._smoothing) * coefficients + LaneLine._smoothing * \
+                                                                                self._smoothing_coefficients
                 # new_smoothing_coefficients[side] = self.coefficients[side]
                 self._smoothing_coefficients = coefficients
-            # Measure and store the curvature radius and center of curvature
-            # self._curvature_center, self._curvature_radius = measure_curvature(point_coords[0], point_coords[1])
-            self._curvature_center, self._curvature_radius = measure_curvature(self._coefficients,
-                                                                               thresholded.shape[0] - 1, self._scale[0],
-                                                                               self._scale[1])
+            # Measure and store the curvature radius
+            self._curvature_radius = measure_curvature(self._coefficients,
+                                                       thresholded.shape[0] - 1, self._scale[0],
+                                                       self._scale[1])
             self._is_unreliable = False
             self._fit_undone = False
-            reliable = self.check_reliability()
-
-    def get_curvature(self):
-        return self._curvature_center, self._curvature_radius
+            self.check_reliability()
 
 
 class LeftLaneLine(LaneLine):
-    # def __init__(self):
-    #    pass
-
     def get_printable_name(self):
         return 'left'
 
@@ -384,9 +362,6 @@ class LeftLaneLine(LaneLine):
 
 
 class RightLaneLine(LaneLine):
-    # def __init__(self):
-    #    pass
-
     def get_printable_name(self):
         return 'right'
 
@@ -399,22 +374,25 @@ class RightLaneLine(LaneLine):
 def get_lane_width(lane_line1, lane_line2, y):
     """
     Returns the distance in pixels between the two lane lines as displayed in a top view, taken horizontally
-    at the given y coordinate
+    at the given y coordinate. If either lane line was not actually found, returns None.
     """
-    x1, x2 = get_bottom_lane_lines_position(lane_line1, lane_line2, y)
+    x1, x2 = get_lane_lines_position_at(lane_line1, lane_line2, y)
+    if x1 is None or x2 is None:
+        return None
     return abs(x1 - x2)
 
 
-def get_bottom_lane_lines_position(lane_line1, lane_line2, y):
+def get_lane_lines_position_at(lane_line1, lane_line2, y):
     """
-    Returns the x values of the interpolated lane lines for the given `y` 
+    Returns the x values of the interpolated lane lines for the given `y`. If no lane line was actually interpolated,
+    returns (None, None).
     """
     coefficients1 = lane_line1.get_coefficients()
     if coefficients1 is None:
-        return None
+        return None, None
     coefficients2 = lane_line2.get_coefficients()
     if coefficients2 is None:
-        return None
+        return None, None
 
     # Could do it fancier, with vector calculus
     x1 = coefficients1[0] * (y ** 2) + coefficients1[1] * y + coefficients1[2]
@@ -434,10 +412,10 @@ class ImageProcessing:
         # TODO give them beter names and document them
         self._mx = 3.66 / 748  # meters per pixel in x dimension
         self._my = 3.48 / 93  # meters per pixel in y dimension
-        self.centroid_window_width = 100
-        self.centroid_window_height = 80
-        self.centroid_window_margin = 100  # TODO tune this!
-        self.filter = gaussian(self.centroid_window_width, std=self.centroid_window_width / 8, sym=True)
+        self._centroid_window_width = 100
+        self._centroid_window_height = 80
+        self._centroid_window_margin = 100  # TODO tune this!
+        self._filter = gaussian(self._centroid_window_width, std=self._centroid_window_width / 8, sym=True)
         self._font = cv2.FONT_HERSHEY_SIMPLEX
 
     def invalidate(self):
@@ -503,12 +481,10 @@ class ImageProcessing:
                      ((15, 15, 100), (25, 150, 255)))
 
             min_grad_size = 10  # TODO make it a parameter
-            # max_grad_dir = math.pi /3
             hsv = cv2.cvtColor(self._top_view, cv2.COLOR_BGR2HSV)
             thresholded = np.zeros_like(hsv[:, :, 0])
             MIN, MAX = 0, 1
             H, S, V = 0, 1, 2
-            # grad_size = find_x_gradient(hsv[:, :, 2])
             grad_size = find_x_gradient(hsv[:, :, 2])
             for mask in masks:
                 thresholded[(mask[MIN][H] <= hsv[:, :, H]) &
@@ -530,24 +506,24 @@ class ImageProcessing:
         assert self._thresholded is not None
         if self._lane_lines is None:
             args = (
-                (self.centroid_window_height, self.centroid_window_width), self._thresholded.shape,
+                (self._centroid_window_height, self._centroid_window_width), self._thresholded.shape,
                 (self._mx, self._my))
             self._lane_lines = [LeftLaneLine(*args), RightLaneLine(*args)]
-        assert self._thresholded.shape[0] % self.centroid_window_height == 0
-        n_bands = self._thresholded.shape[0] // self.centroid_window_height
+        assert self._thresholded.shape[0] % self._centroid_window_height == 0
+        n_bands = self._thresholded.shape[0] // self._centroid_window_height
 
         ''' Partition the image in horizontal bands of height self.height, numbered starting from 0, where band 0
         is at the bottom of the image (closest to the camera) '''
         convolved_bands = []
         for band in range(n_bands):
-            # convolve the band with a pre-computed filter, stored in self.filter, to detect lane line markers
+            # convolve the band with a pre-computed filter, stored in self._filter, to detect lane line markers
             image_band = np.sum(
                 self._thresholded[
-                int(self._thresholded.shape[0] - (band + 1) * self.centroid_window_height):int(
-                    self._thresholded.shape[0] - band * self.centroid_window_height),
+                int(self._thresholded.shape[0] - (band + 1) * self._centroid_window_height):int(
+                    self._thresholded.shape[0] - band * self._centroid_window_height),
                 :],
                 axis=0)
-            convolved_bands.append(np.convolve(self.filter, image_band, mode='same'))
+            convolved_bands.append(np.convolve(self._filter, image_band, mode='same'))
 
         new_centroids_x = []  # Will collect two lists of centroid x coordinates, one list per lane line
         for lane_line in self._lane_lines:
@@ -563,7 +539,7 @@ class ImageProcessing:
                     hystogram of the left or right bottom quarter of the image (left or right, depending on which lane). '''
                     if lane_line.get_centroid(0) is None or not lane_line.get_centroid(0).is_good():
                         print('Recentering lane', lane_line.get_printable_name())
-                        lane_line.recenter(self._thresholded, self.filter)
+                        lane_line.recenter(self._thresholded, self._filter)
                     starting_x = lane_line.get_bottom_x()
                 else:
                     ''' For other bands different from the bottom one, find the first window (from the top) in a band below,
@@ -577,10 +553,8 @@ class ImageProcessing:
                         assert starting_x is not None
                 ''' Now that you have `starting_x`, do a convolution of the thresholded image, with a filter, around
                 `starting_x` in the current band, looking for lane line points '''
-                # min_index = int(max(starting_x + offset - self.centroid_window_margin, 0))
-                # max_index = int(min(starting_x + offset + self.centroid_window_margin, self._thresholded.shape[1]))
-                min_index = int(max(starting_x - self.centroid_window_margin, 0))
-                max_index = int(min(starting_x + self.centroid_window_margin, self._thresholded.shape[1]))
+                min_index = int(max(starting_x - self._centroid_window_margin, 0))
+                max_index = int(min(starting_x + self._centroid_window_margin, self._thresholded.shape[1]))
                 # Compute the x coordinate of the centroid of the window that contains lane line points
                 # centroid_x = np.argmax(convolved_bands[band][min_index:max_index]) + min_index - offset
                 centroid_x = np.argmax(convolved_bands[band][min_index:max_index]) + min_index
@@ -588,7 +562,6 @@ class ImageProcessing:
                 # Update the list of centroid x coordinates with what just found for the current lane line and band
                 lane_centroids_x.append(Centroid(centroid_x, goodness))
             new_centroids_x.append(lane_centroids_x)
-        # Now verify the sanity of found centroids, and update the two lane lines with centroids that passed the sanity test
 
         for lane_line, centroids in zip(self._lane_lines, new_centroids_x):
             lane_line.set_centroids(centroids)
@@ -625,20 +598,20 @@ class ImageProcessing:
             centroids = lane_line.get_centroids()
             for band, centroid in enumerate(centroids):
                 if centroid is not None:
-                    rect_x0 = int(centroid.x) - self.centroid_window_width // 2
-                    rect_y0 = self.centroid_window_height * (len(centroids) - band) - 1
+                    rect_x0 = int(centroid.x) - self._centroid_window_width // 2
+                    rect_y0 = self._centroid_window_height * (len(centroids) - band) - 1
                     rect_color = (0, 255, 0) if centroid.is_good() else (0, 0, 255)
                     image_with_overlay = cv2.rectangle(image,
                                                        (rect_x0, rect_y0),
-                                                       (rect_x0 + self.centroid_window_width,
-                                                        rect_y0 - self.centroid_window_height),
+                                                       (rect_x0 + self._centroid_window_width,
+                                                        rect_y0 - self._centroid_window_height),
                                                        color=rect_color)
                     text_color = (255, 255, 255)
                     font = cv2.FONT_HERSHEY_SIMPLEX
                     gap_x = 10
                     gap_y = 30
                     cv2.putText(image_with_overlay, "{:.1f}".format(centroid.goodness),
-                                (rect_x0 + self.centroid_window_width + gap_x, rect_y0 - gap_y), font, .5, text_color,
+                                (rect_x0 + self._centroid_window_width + gap_x, rect_y0 - gap_y), font, .5, text_color,
                                 1,
                                 cv2.LINE_AA)
 
@@ -674,13 +647,13 @@ class ImageProcessing:
         return image_with_lane_lines
 
     def overlay_lanes_in_perspective(self, image):
-        '''
+        """
         Color in the given image the area corresponding to the detected lane.
         :param image: a color image taken by the camera (shoudl be already corrected for distortion)
         :param M: the transformation matrix previously used to warp camera images to the brid-eye view;
         the method uses it inverse to project the colored polygon onto the camera perspective.
         :return: the resulting image.
-        '''
+        """
 
         assert self._M is not None
         plot_y, fit_x = self.get_lanes_points(image.shape[0])
@@ -719,7 +692,7 @@ class ImageProcessing:
 
         radiuses = []
         for lane_line in self._lane_lines:
-            _, radius = lane_line.get_curvature()
+            radius = lane_line.get_curvature()
             radiuses.append(radius)
         # 688 here below comes out of get_top_view() TODO parametrize properly
         lane_width = get_lane_width(self._lane_lines[0], self._lane_lines[1], 688) * self._mx
@@ -748,8 +721,8 @@ class ImageProcessing:
 
 
 if __name__ == '__main__':
-    # input_fname = 'project_video.mp4'
-    input_fname = 'harder_challenge_video.mp4'
+    input_fname = 'project_video.mp4'
+    # input_fname = 'harder_challenge_video.mp4'
     output_dir = 'output_images'  # TODO use command line parameters instead
     # Directory containing images for caliration
     calibration_dir = 'camera_cal'
@@ -768,17 +741,17 @@ if __name__ == '__main__':
     output_fname = 'out_' + input_fname
     vidcap = cv2.VideoCapture(input_fname)
     fps = vidcap.get(cv2.CAP_PROP_FPS)
-    vertical_resolution = vidcap.get(cv2.CAP_PROP_FRAME_HEIGHT)
     assert fps > 0
+    vertical_resolution = vidcap.get(cv2.CAP_PROP_FRAME_HEIGHT)
     fourcc = cv2.VideoWriter_fourcc(*'XVID')
-    vidwrite = cv2.VideoWriter(output_fname, fourcc=fourcc, fps=fps, frameSize=(1280, 720))
+    vidwrite = cv2.VideoWriter(output_fname, fourcc=fourcc, fps=fps,
+                               frameSize=(1280, int(vertical_resolution)))  # TODO remove hardwiring of 1280
     print('Source video', input_fname, 'is at', fps, 'fps with vertical resolution of', int(vertical_resolution),
           'pixels')
 
     frame_counter = 0
     # vidcap.set(cv2.CAP_PROP_POS_MSEC, 6000)
     start_time = time.time()
-
     processor = ImageProcessing()
     while (True):  # TODO consider to move it to an OpenCV loop
         read, frame = vidcap.read()
@@ -786,18 +759,13 @@ if __name__ == '__main__':
             break
         frame_counter += 1
         print('Processing frame', frame_counter)
-        # Un-distort it applying camera calibration
-        undistorted_img = undistort_image(frame, mtx, dist, roi)
+        # Un-distort the frame applying camera calibration
+        undistorted_img = undistort_image(frame, mtx, dist)
+        # Process teh frame and find the lane lines
         processed = processor.process_frame(undistorted_img, frame_counter)
+        # Write the result to the output video stream
         vidwrite.write(processed)
         if frame_counter % 100 == 0:
             pass
 
     print('\nProcessing rate {:.1f} fps'.format(frame_counter / (time.time() - start_time)))
-
-# TODO
-'''
-evaluate goodness of interpolated lanes
-improve masking for video 2
-tune sliding window parameter
-'''
