@@ -727,16 +727,19 @@ class ImageProcessing:
 
     def overlay_additional_info(self, image, frame_n):
 
-        radiuses = []
+        '''radiuses = []
         for lane_line in self._lane_lines:
             radius = lane_line.get_curvature()
-            radiuses.append(radius)
-        lane_width = get_lane_width(self._lane_lines[0], self._lane_lines[1], image.shape[0] - 1) * self._mx
-        top_lane_width = get_lane_width(self._lane_lines[0], self._lane_lines[1], image.shape[0] // 2) * self._mx
-        to_print = 'F# {:d} - Curv. r., L={:5.0f}m R={:5.0f}m - Lane w.={:2.2f}m top={:2.2f}m'.format(frame_n,
-                                                                                                      *radiuses,
-                                                                                                      lane_width,
-                                                                                                      top_lane_width)
+            radiuses.append(radius)'''
+        radius = (self._lane_lines[0].get_curvature()+self._lane_lines[1].get_curvature())/2
+        x1, x2 = get_lane_lines_position_at(self._lane_lines[0], self._lane_lines[1], image.shape[0] - 1)
+        lane_width = abs(x1-x2) * self._mx
+        position = ((x1+x2)/2-image.shape[1]//2)*self._mx
+        # top_lane_width = get_lane_width(self._lane_lines[0], self._lane_lines[1], image.shape[0] // 2) * self._mx
+        to_print = '#{:d} Curvature radius={:5.0f}m, Lane width={:2.2f}m, Position={:+1.2f}m'.format(frame_n,
+                                                                                                     radius,
+                                                                                                     lane_width,
+                                                                                                     position)
         text_color = (0, 0, 128)
         cv2.putText(image, to_print, (0, 50), self._font, 1, text_color, 2, cv2.LINE_AA)
         return image
