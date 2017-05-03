@@ -218,6 +218,9 @@ class LaneLine:
     def is_unreliable(self):
         return self._is_unreliable
 
+    def mark_unreliable(self):
+        self._is_unreliable = True
+
     def get_curvature(self):
         return self._curvature_radius
 
@@ -242,9 +245,11 @@ class LaneLine:
         """
         if abs(self._curvature_radius) < 50:
             self._is_unreliable = True
+            print(1)
         good_centroids_count = sum(centroid.is_good() for centroid in self._centroids)
         if good_centroids_count < 2:
             self._is_unreliable = True
+            print(2)
         return self._is_unreliable
 
     def check_reliability_against(self, lane_line):
@@ -253,40 +258,63 @@ class LaneLine:
         with each other. The `self` lane line is checked against the given one. Returns the result as a boolean. 
         """
 
-        ''' If both lane lines have a small enough curvature radius, we can assume car is along a curve; in that
-        case, the two lane lines must curve the same direction (radius of curvature must have the same sign) '''
-        if abs(self._curvature_radius) + abs(
-                lane_line._curvature_radius) < 1200 and self._curvature_radius / lane_line._curvature_radius < 0:
-            self._is_unreliable = lane_line._is_unreliable = True
+        # Fetch the curavture radius and its absolute value for both lane lines
+        radius1 = self._curvature_radius
+        radius2 = lane_line._curvature_radius
+        abs_radius1 = abs(radius1)
+        abs_radius2 = abs(radius2)
+
+        straight = 3000
+        bent = 620
+
+        def mark_both_unreliable():
+            self.mark_unreliable()
+            lane_line.mark_unreliable()
+
+        ''' If one is bent and the other is straight, mark them as unreliable'''
+        if (abs_radius1 > straight and abs_radius2 < bent) or (abs_radius2 > straight and abs_radius1 < bent):
+            mark_both_unreliable()
             return
 
-        ''' If the lane is too narrow at the bottom of the image (where the car is)... '''
-        x1, x2 = get_lane_lines_position_at(self, lane_line, 688)  # TODO remove this stinking hard-wiring
-        if abs(x1 - x2) * self._scale[0] < 2:  # TODO hardwiring
-            # ... keep good the lane that is the closest to the respective side
-            if abs(x1) < abs(self._image_shape[1] - x2):
-                lane_line._is_unreliable = True
-            else:
-                self._is_unreliable = True
-        elif abs(x1 - x2) * self._scale[0] > 4.05:  # TODO hardwiring
-            ''' If the lane is too wide at the bottom of the image, mark both lane lines as bad'''
-            self._is_unreliable = lane_line._is_unreliable = True
+        ''' Extremely unlikely, but prevent division by zero later on '''
+        if radius1 == 0 or radius2 == 0:
+            mark_both_unreliable()
             return
 
-        if abs(self._image_shape[1] - x2) > 550 or x1 > 550:
-            self._is_unreliable = lane_line._is_unreliable = True
+        ''' If both are bent but with opposing curvature, mark them as unreliable'''
+        if abs_radius1 < bent and abs_radius2 < bent and radius1 / radius2 < 0:
+            mark_both_unreliable()
             return
 
-        ''' if the lane is too narrow a the top, then mark both lane lines as unreliable'''
-        top_dist = get_lane_width(self, lane_line, 360) * self._scale[0]
-        if top_dist < 2 or top_dist > 5:
-            self._is_unreliable = lane_line._is_unreliable = True
+        ''' If the ratio between the two curvature radii (in absolute value) is too low or high, mark both
+        lane lines as unreliable'''
+
+        abs_ratio = abs_radius1 / abs_radius2
+        if abs_ratio > 5 or abs_ratio < 1 / 5:
+            mark_both_unreliable()
             return
 
-        if (abs(self._curvature_radius) < 390 and abs(lane_line._curvature_radius) > 1000) or \
-                (abs(self._curvature_radius) > 1000 and abs(lane_line._curvature_radius) < 390):
-            self._is_unreliable = lane_line._is_unreliable = True
+        ''' If a lane line falls outside of its half-image at the bottom, mark it as unreliable'''
+        x1, x2 = get_lane_lines_position_at(self, lane_line, self._image_shape[0] - 1)
+        x_left = min(x1, x2)
+        x_right = max(x1, x2)
+        lane_left = self if x1 < x2 else lane_line
+        lane_right = self if x1 >= x2 else lane_line
+        if x_left < 0 or x_left > self._image_shape[1] // 2:
+            lane_left.mark_unreliable()
+        if x_right <= self._image_shape[1] // 2 or x_right >= self._image_shape[1]:
+            lane_right.mark_unreliable()
+
+        ''' If both lane lines are bent, then their curvature radius cannot be too different '''
+        if abs_radius1 < bent and abs_radius2 < bent and (abs_ratio > 1.59 or abs_ratio < 1/1.59):
+            mark_both_unreliable()
             return
+
+        ''' If lane width is too small, mark both lane lines as unreliable'''
+        if abs(x1-x2)* self._scale[0] < 2.5:
+            mark_both_unreliable()
+            return
+
 
     def fit(self, thresholded):
         """
@@ -409,18 +437,25 @@ class ImageProcessing:
         self._M = None
         self.invalidate()
         # Computation parameters, tune with care
-        # TODO give them beter names and document them
-        self._mx = 3.66 / 748  # meters per pixel in x dimension
-        self._my = 3.48 / 93  # meters per pixel in y dimension
-        self._centroid_window_width = 100
-        self._centroid_window_height = 80
-        self._centroid_window_margin = 100  # TODO tune this!
-        self._filter = gaussian(self._centroid_window_width, std=self._centroid_window_width / 8, sym=True)
+        # measurement unit conversion rate for the top view in the x direction, in meters per pixel
+        self._mx = 3.66 / 748
+        # measurement unit conversion rate for the top view in the y direction, in meters per pixel
+        self._my = 3.48 / 93
+        # Parameters coverning the size of the sliding window to find lane lines, and how much it slides either way
+        self._sliding_window_width = 100
+        self._sliding_window_height = 80
+        self._sliding_window_margin = 100
+        # Filter used for convolution to find the lane line within a sliding window
+        self._filter = gaussian(self._sliding_window_width, std=self._sliding_window_width / 8, sym=True)
+        # Font used for image overlay
         self._font = cv2.FONT_HERSHEY_SIMPLEX
 
     def invalidate(self):
+        # Top-view of the image
         self._top_view = None
+        # Result of thresholding the top-view
         self._thresholded = None
+        # Points from the top-view believed to belong to either lane line
         self._lanes_points = None
 
     def get_top_view(self):
@@ -480,7 +515,7 @@ class ImageProcessing:
                      ((4, 0, 180), (15, 80, 255)),
                      ((15, 15, 100), (25, 150, 255)))
 
-            min_grad_size = 10  # TODO make it a parameter
+            min_grad_size = 10
             hsv = cv2.cvtColor(self._top_view, cv2.COLOR_BGR2HSV)
             thresholded = np.zeros_like(hsv[:, :, 0])
             MIN, MAX = 0, 1
@@ -506,11 +541,11 @@ class ImageProcessing:
         assert self._thresholded is not None
         if self._lane_lines is None:
             args = (
-                (self._centroid_window_height, self._centroid_window_width), self._thresholded.shape,
+                (self._sliding_window_height, self._sliding_window_width), self._thresholded.shape,
                 (self._mx, self._my))
             self._lane_lines = [LeftLaneLine(*args), RightLaneLine(*args)]
-        assert self._thresholded.shape[0] % self._centroid_window_height == 0
-        n_bands = self._thresholded.shape[0] // self._centroid_window_height
+        assert self._thresholded.shape[0] % self._sliding_window_height == 0
+        n_bands = self._thresholded.shape[0] // self._sliding_window_height
 
         ''' Partition the image in horizontal bands of height self.height, numbered starting from 0, where band 0
         is at the bottom of the image (closest to the camera) '''
@@ -519,8 +554,8 @@ class ImageProcessing:
             # convolve the band with a pre-computed filter, stored in self._filter, to detect lane line markers
             image_band = np.sum(
                 self._thresholded[
-                int(self._thresholded.shape[0] - (band + 1) * self._centroid_window_height):int(
-                    self._thresholded.shape[0] - band * self._centroid_window_height),
+                int(self._thresholded.shape[0] - (band + 1) * self._sliding_window_height):int(
+                    self._thresholded.shape[0] - band * self._sliding_window_height),
                 :],
                 axis=0)
             convolved_bands.append(np.convolve(self._filter, image_band, mode='same'))
@@ -553,8 +588,8 @@ class ImageProcessing:
                         assert starting_x is not None
                 ''' Now that you have `starting_x`, do a convolution of the thresholded image, with a filter, around
                 `starting_x` in the current band, looking for lane line points '''
-                min_index = int(max(starting_x - self._centroid_window_margin, 0))
-                max_index = int(min(starting_x + self._centroid_window_margin, self._thresholded.shape[1]))
+                min_index = int(max(starting_x - self._sliding_window_margin, 0))
+                max_index = int(min(starting_x + self._sliding_window_margin, self._thresholded.shape[1]))
                 # Compute the x coordinate of the centroid of the window that contains lane line points
                 # centroid_x = np.argmax(convolved_bands[band][min_index:max_index]) + min_index - offset
                 centroid_x = np.argmax(convolved_bands[band][min_index:max_index]) + min_index
@@ -567,9 +602,12 @@ class ImageProcessing:
             lane_line.set_centroids(centroids)
 
     def fit_lane_lines(self):
+        # Interpolate the points believed to belong to either lane lilne
         for lane_line in self._lane_lines:
             lane_line.fit(self._thresholded)
 
+        ''' If either interpolated lane line is found to be unreliable, then replace it with the lane line
+        interpolated in the previous frame '''
         if self._prev_lane_lines is None:
             self._prev_lane_lines = []
             for lane_line in self._lane_lines:
@@ -577,18 +615,17 @@ class ImageProcessing:
         else:
             for i_lane, lane_line in enumerate(self._lane_lines):
                 if lane_line._is_unreliable:
-                    self._lane_lines[i_lane] = copy.deepcopy(self._prev_lane_lines[i_lane])
-                    self._lane_lines[i_lane]._is_unreliable = True  # TODO change to public method call
+                    self._lane_lines[i_lane] = copy.deepcopy(self._prev_lane_lines[i_lane])  # !!
+                    self._lane_lines[i_lane].mark_unreliable()  # Make sure the lane line is still marked as unreliable
 
+        # Now check the consistency of the two lane lines against each other
         self._lane_lines[0].check_reliability_against(self._lane_lines[1])
 
-        for i_lane, lane_line in enumerate(self._lane_lines):  # TODO redundant
+        for i_lane, lane_line in enumerate(self._lane_lines):
             if lane_line._is_unreliable:
-                self._lane_lines[i_lane] = copy.deepcopy(self._prev_lane_lines[i_lane])
-                self._lane_lines[i_lane]._is_unreliable = True  # TODO change to public method call
-
-        for i_lane, lane_line in enumerate(self._lane_lines):  # TODO redundant
-            if not lane_line._is_unreliable:
+                self._lane_lines[i_lane] = copy.deepcopy(self._prev_lane_lines[i_lane])  # !!
+                self._lane_lines[i_lane].mark_unreliable()
+            else:
                 self._prev_lane_lines[i_lane] = copy.deepcopy(lane_line)
 
     def overlay_windows(self, image):
@@ -598,20 +635,20 @@ class ImageProcessing:
             centroids = lane_line.get_centroids()
             for band, centroid in enumerate(centroids):
                 if centroid is not None:
-                    rect_x0 = int(centroid.x) - self._centroid_window_width // 2
-                    rect_y0 = self._centroid_window_height * (len(centroids) - band) - 1
+                    rect_x0 = int(centroid.x) - self._sliding_window_width // 2
+                    rect_y0 = self._sliding_window_height * (len(centroids) - band) - 1
                     rect_color = (0, 255, 0) if centroid.is_good() else (0, 0, 255)
                     image_with_overlay = cv2.rectangle(image,
                                                        (rect_x0, rect_y0),
-                                                       (rect_x0 + self._centroid_window_width,
-                                                        rect_y0 - self._centroid_window_height),
+                                                       (rect_x0 + self._sliding_window_width,
+                                                        rect_y0 - self._sliding_window_height),
                                                        color=rect_color)
                     text_color = (255, 255, 255)
                     font = cv2.FONT_HERSHEY_SIMPLEX
                     gap_x = 10
                     gap_y = 30
                     cv2.putText(image_with_overlay, "{:.1f}".format(centroid.goodness),
-                                (rect_x0 + self._centroid_window_width + gap_x, rect_y0 - gap_y), font, .5, text_color,
+                                (rect_x0 + self._sliding_window_width + gap_x, rect_y0 - gap_y), font, .5, text_color,
                                 1,
                                 cv2.LINE_AA)
 
@@ -694,9 +731,8 @@ class ImageProcessing:
         for lane_line in self._lane_lines:
             radius = lane_line.get_curvature()
             radiuses.append(radius)
-        # 688 here below comes out of get_top_view() TODO parametrize properly
-        lane_width = get_lane_width(self._lane_lines[0], self._lane_lines[1], 688) * self._mx
-        top_lane_width = get_lane_width(self._lane_lines[0], self._lane_lines[1], 360) * self._mx
+        lane_width = get_lane_width(self._lane_lines[0], self._lane_lines[1], image.shape[0] - 1) * self._mx
+        top_lane_width = get_lane_width(self._lane_lines[0], self._lane_lines[1], image.shape[0] // 2) * self._mx
         to_print = 'F# {:d} - Curv. r., L={:5.0f}m R={:5.0f}m - Lane w.={:2.2f}m top={:2.2f}m'.format(frame_n,
                                                                                                       *radiuses,
                                                                                                       lane_width,
@@ -720,14 +756,38 @@ class ImageProcessing:
         return with_text
 
 
+def parse_args():
+    # Description of this program.
+    desc = "Advanced Lane Detection -Project for Udacity's Self-Driving Cars Nanodegree Program."
+
+    # Create the argument parser.
+    parser = argparse.ArgumentParser(description=desc)
+
+    # Add arguments to the parser.
+    parser.add_argument("--input", required=False, default='project_video.mp4',
+                        help="name of the input file with video clip to be processed")
+
+    # Parse the command-line arguments.
+    args = parser.parse_args()
+
+    # Get the arguments.
+    input_fname = args.input
+
+    return input_fname
+
+
 if __name__ == '__main__':
-    input_fname = 'project_video.mp4'
-    # input_fname = 'harder_challenge_video.mp4'
-    output_dir = 'output_images'  # TODO use command line parameters instead
+    input_fname = parse_args()
+    output_fname = 'out_' + input_fname
+
+    # Directory for sample output images
+    output_dir = 'output_images'
+
     # Directory containing images for caliration
     calibration_dir = 'camera_cal'
-    # Size of the checkered calibration target
-    target_size = (9, 6)  # (columns, rows)
+
+    # Size of the checkered calibration target, columns by rows
+    target_size = (9, 6)
 
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -738,22 +798,24 @@ if __name__ == '__main__':
     # Save an image with one calibration sample along with its undistorted version
     # save_undistorted_sample(calibration_dir + '/calibration2.jpg', mtx, dist, roi)
 
-    output_fname = 'out_' + input_fname
     vidcap = cv2.VideoCapture(input_fname)
     fps = vidcap.get(cv2.CAP_PROP_FPS)
     assert fps > 0
     vertical_resolution = vidcap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+    horizontal_resolution = vidcap.get(cv2.CAP_PROP_FRAME_WIDTH)
     fourcc = cv2.VideoWriter_fourcc(*'XVID')
     vidwrite = cv2.VideoWriter(output_fname, fourcc=fourcc, fps=fps,
-                               frameSize=(1280, int(vertical_resolution)))  # TODO remove hardwiring of 1280
-    print('Source video', input_fname, 'is at', fps, 'fps with vertical resolution of', int(vertical_resolution),
+                               frameSize=(int(horizontal_resolution), int(vertical_resolution)))
+    print('Source video', input_fname, 'is at', fps, 'fps with resolution of', int(horizontal_resolution), 'by',
+          int(vertical_resolution),
           'pixels')
 
     frame_counter = 0
     # vidcap.set(cv2.CAP_PROP_POS_MSEC, 6000)
     start_time = time.time()
     processor = ImageProcessing()
-    while (True):  # TODO consider to move it to an OpenCV loop
+
+    while (True):
         read, frame = vidcap.read()
         if not read:
             break
