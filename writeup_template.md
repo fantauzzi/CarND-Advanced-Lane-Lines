@@ -18,11 +18,11 @@ The goals / steps of this project are the following:
 
 [//]: # (Image References)
 
-[image1]: ./examples/undistort_output.png "Undistorted"
-[image2]: ./test_images/test1.jpg "Road Transformed"
-[image3]: ./examples/binary_combo_example.jpg "Binary Example"
-[image4]: ./examples/warped_straight_lines.jpg "Warp Example"
-[image5]: ./examples/color_fit_lines.jpg "Fit Visual"
+[image1]: ./output_images/undistored-calibration2.png "Undistorted calibration image"
+[image2]: ./output_images/undistorted.png "Undistorted frame"
+[image3]: ./output_images/thresholded.png "Thresholded"
+[image4]: ./output_images/top_view.png "Bird-eye view"
+[image5]: ./output_images/interpolated.png "Interpolated lane lines"
 [image6]: ./examples/example_output.jpg "Output"
 [video1]: ./project_video.mp4 "Video"
 
@@ -39,42 +39,40 @@ You're reading it!
 
 ####1. Briefly state how you computed the camera matrix and distortion coefficients. Provide an example of a distortion corrected calibration image.
 
-The code for this step is contained in the first code cell of the IPython notebook located in "./examples/example.ipynb" (or in lines # through # of the file called `some_file.py`).  
+Function `calibrate_camera()` reads JPEG files from a given directory and use them to calculate the camera calibration parameters.
 
-I start by preparing "object points", which will be the (x, y, z) coordinates of the chessboard corners in the world. Here I am assuming the chessboard is fixed on the (x, y) plane at z=0, such that the object points are the same for each calibration image.  Thus, `objp` is just a replicated array of coordinates, and `objpoints` will be appended with a copy of it every time I successfully detect all chessboard corners in a test image.  `imgpoints` will be appended with the (x, y) pixel position of each of the corners in the image plane with each successful chessboard detection.  
-
-I then used the output `objpoints` and `imgpoints` to compute the camera calibration and distortion coefficients using the `cv2.calibrateCamera()` function.  I applied this distortion correction to the test image using the `cv2.undistort()` function and obtained this result: 
+It converts every image to grayscale and then finds the corners of a checkered calibration pattern with `cv2.findChessboardCorners()`. For every input image, it compiles the list of found corner coordinates (image points), and the coordinates those points should have after distortion correction (object points). It then calls `cv2.calibrateCamera()`, which compares the found image points coordinates with the object points coordinates, and outputs the camera matrix and distortion coefficients. After that, it calls `cv2.getOptimalNewCameraMatrix()` to ensure every pixel from the original image is still in the undistorted image (at the expense of possible black pixels at the edges of the undistorted image).
+ 
+ Before returning the required parameters and camera matrix, function `calibrate_camera()` evaluates how good they are: it uses them to transform the object points into image points, with `cv2.projectPoints()`, and then it measures the average distance between the transformed points and the respective actual image points (as detected in the calibration images). The closer to 0 the average distance, the better the calibration quality. This measure could be used to calibrate the camera with different and/or additional images, to see if the calibration result improves.
+ 
+ The image below shows one of the calibration images, and its undistorted version after camera calibration. The image has been produced with function `save_undistorted_sample()`
 
 ![alt text][image1]
 
 ###Pipeline (single images)
 
 ####1. Provide an example of a distortion-corrected image.
-To demonstrate this step, I will describe how I apply the distortion correction to one of the test images like this one:
+After camera calibration, a loop in `main.py` processes video frames one at a time. It undistorts the frame calling `undistort_image()` and then passes the undistorted frame to method `ImageProcessing.process_frame()`. The image below is a frame as returned by `undistort_image()`.
+
 ![alt text][image2]
-####2. Describe how (and identify where in your code) you used color transforms, gradients or other methods to create a thresholded binary image.  Provide an example of a binary image result.
-I used a combination of color and gradient thresholds to generate a binary image (thresholding steps at lines # through # in `another_file.py`).  Here's an example of my output for this step.  (note: this is not actually from one of the test images)
 
-![alt text][image3]
+####2. Describe how (and identify where in your code) you performed a perspective transform and provide an example of a transformed image.
 
-####3. Describe how (and identify where in your code) you performed a perspective transform and provide an example of a transformed image.
+Most of the image elaboration is done in two classes, `ImageProcessing`, that drives every step of the processing and stores the resulting images, and LaneLine, which finds lane line markers by interpolation and stores the results.
+ 
+Method `ImageProcessing.get_top_view()` transforms the image perspective, going from the camera viewpoint to a bird-eye view. In such a way, lines that are parallel on the road and converge to a point in the camera perspective, are parallel again in the transformed image. Previous camera calibration and image undistortion are instrumental to get lines that are parallel on the road actually parallel in the bird-eye view.
 
-The code for my perspective transform includes a function called `warper()`, which appears in lines 1 through 8 in the file `example.py` (output_images/examples/example.py) (or, for example, in the 3rd code cell of the IPython notebook).  The `warper()` function takes as inputs an image (`img`), as well as source (`src`) and destination (`dst`) points.  I chose the hardcode the source and destination points in the following manner:
+For perspective transform I used OpenCV functions `cv2.getPerspectiveTransform()` and `cv2.warpPerspective()`: the former computes a transformation matrix, and the latter applies it to the (undistorted) image.
 
-```
-src = np.float32(
-    [[(img_size[0] / 2) - 55, img_size[1] / 2 + 100],
-    [((img_size[0] / 6) - 10), img_size[1]],
-    [(img_size[0] * 5 / 6) + 60, img_size[1]],
-    [(img_size[0] / 2 + 55), img_size[1] / 2 + 100]])
-dst = np.float32(
-    [[(img_size[0] / 4), 0],
-    [(img_size[0] / 4), img_size[1]],
-    [(img_size[0] * 3 / 4), img_size[1]],
-    [(img_size[0] * 3 / 4), 0]])
+In order to compute the transformation matrix, OpenCV requires coordinates of four points on the image, and corresponding coordinates after transformation.
 
-```
-This resulted in the following source and destination points:
+This is how the four points on the image are chosen. Starting from an undistorted camera image with straight lane lines, and with the help of a graphics editor, I have chosen a pair of points on either lane, that after perspective transformation should be the vertices of a rectangle; see image below, where the for points are named A, B, C and D.
+
+The program determines the intersection of the two lines going through the two pairs of points respectively (AD and BC), obtaining the vanishing point of the camera perspective, V in the image above. The program then computes four points to be used for the perspective transformation, A' and D' laying along the AV line, and B' and C' laying along the BV line, such that after transformation they should delimit a rectangle.
+
+That way, once I set the four points A, B, C and D, I could easily tune the distance of segment D'C' from the top of the image, and of segment A'B' from the bottom. At the bottom, I wanted to leave the car hood out of the transformed image; at the top, I wanted to include as much as possible of the road, and the lane lines, before they become too blurry to be useful for further processing. 
+
+Table below lists coordinates of the four points, before and after perspective transformation.    
 
 | Source        | Destination   | 
 |:-------------:|:-------------:| 
@@ -83,13 +81,23 @@ This resulted in the following source and destination points:
 | 1127, 720     | 960, 720      |
 | 695, 460      | 960, 0        |
 
-I verified that my perspective transform was working as expected by drawing the `src` and `dst` points onto a test image and its warped counterpart to verify that the lines appear parallel in the warped image.
+Image below shows the transformation result on a camera frame.
 
 ![alt text][image4]
 
+I ensured the image maintains the original resolution after transformation (1280x720 pixels), which allows me to overlay the resulting image on the camera image, very useful for subsequent parameters tuning and debugging.
+
+####3. Describe how (and identify where in your code) you used color transforms, gradients or other methods to create a thresholded binary image.  Provide an example of a binary image result.
+
+Method `ImageProcessing.get_thresholded()` starts from a bird-eye view image (undistorted and perspective transformed), and thresholds it producing a black-and-white image with the same resolution. Image below is an example of the output.
+
+![alt text][image3]
+
+The method converts the image into a HSV color space, and then thresholds its individual channels and the x gradient of the V channel. The operation is repeated with different thresholding intervals to match white and yellow lines, and to be more likely to match them if they are aligned close to vertical. If a pixel passes thresholding with at least one interval, then it is included in the thresholded output. 
+
 ####4. Describe how (and identify where in your code) you identified lane-line pixels and fit their positions with a polynomial?
 
-Then I did some other stuff and fit my lane lines with a 2nd order polynomial kinda like this:
+Method `ImageProcessing.position_windows()` indentifies areas in the thresholded image that are more likely to contain pixels from the lane lines. Method `ImageProcessing.fit()` interpolates those pixels with two parabolas, one per lane line. 
 
 ![alt text][image5]
 

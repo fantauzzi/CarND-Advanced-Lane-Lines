@@ -7,6 +7,7 @@ import math
 import time
 import copy
 import argparse
+import PIL
 import matplotlib.gridspec as gridspec
 from matplotlib.widgets import Slider, RadioButtons
 from scipy.signal import gaussian
@@ -306,15 +307,14 @@ class LaneLine:
             lane_right.mark_unreliable()
 
         ''' If both lane lines are bent, then their curvature radius cannot be too different '''
-        if abs_radius1 < bent and abs_radius2 < bent and (abs_ratio > 1.59 or abs_ratio < 1/1.59):
+        if abs_radius1 < bent and abs_radius2 < bent and (abs_ratio > 1.59 or abs_ratio < 1 / 1.59):
             mark_both_unreliable()
             return
 
         ''' If lane width is too small, mark both lane lines as unreliable'''
-        if abs(x1-x2)* self._scale[0] < 2.5:
+        if abs(x1 - x2) * self._scale[0] < 2.5:
             mark_both_unreliable()
             return
-
 
     def fit(self, thresholded):
         """
@@ -426,6 +426,12 @@ def get_lane_lines_position_at(lane_line1, lane_line2, y):
     x1 = coefficients1[0] * (y ** 2) + coefficients1[1] * y + coefficients1[2]
     x2 = coefficients2[0] * (y ** 2) + coefficients2[1] * y + coefficients2[2]
     return x1, x2
+
+
+def turn_grayscale_into_color(image):
+    assert len(image.shape) == 2
+    color_image = cv2.merge((image, image, image))
+    return color_image
 
 
 class ImageProcessing:
@@ -721,7 +727,7 @@ class ImageProcessing:
         return result
 
     def overlay_thresholded(self, image):
-        thresholded_color = cv2.merge((self._thresholded, self._thresholded, self._thresholded))
+        thresholded_color = turn_grayscale_into_color(self._thresholded)
         with_thresholded = cv2.addWeighted(image, 1, thresholded_color, 0.5, 0)
         return with_thresholded
 
@@ -731,10 +737,10 @@ class ImageProcessing:
         for lane_line in self._lane_lines:
             radius = lane_line.get_curvature()
             radiuses.append(radius)'''
-        radius = (self._lane_lines[0].get_curvature()+self._lane_lines[1].get_curvature())/2
+        radius = (self._lane_lines[0].get_curvature() + self._lane_lines[1].get_curvature()) / 2
         x1, x2 = get_lane_lines_position_at(self._lane_lines[0], self._lane_lines[1], image.shape[0] - 1)
-        lane_width = abs(x1-x2) * self._mx
-        position = ((x1+x2)/2-image.shape[1]//2)*self._mx
+        lane_width = abs(x1 - x2) * self._mx
+        position = ((x1 + x2) / 2 - image.shape[1] // 2) * self._mx
         # top_lane_width = get_lane_width(self._lane_lines[0], self._lane_lines[1], image.shape[0] // 2) * self._mx
         to_print = '#{:d} Curvature radius={:5.0f}m, Lane width={:2.2f}m, Position={:+1.2f}m'.format(frame_n,
                                                                                                      radius,
@@ -748,15 +754,74 @@ class ImageProcessing:
         self._unprocessed = frame
         self.invalidate()
         self.get_top_view()
+        if frame_n == 336:
+            save_frame(self._top_view, 'output_images/top_view.png', 'Top view')
         self.get_thresholded()
+        if frame_n == 336:
+            save_frame(self._thresholded, 'output_images/thresholded.png', 'Thresholded')
         self.position_windows()
         self.fit_lane_lines()
         frame_with_lane = self.overlay_lanes_in_perspective(frame)
         with_thresholded = self.overlay_thresholded(frame_with_lane)
         with_windows = self.overlay_windows(with_thresholded)
         with_lane_line = self.overlay_lane_lines(with_windows)
+        if frame_n == 336:
+            save_frame(with_lane_line, 'output_images/interpolated.png', 'Interpolated lanes')
         with_text = self.overlay_additional_info(with_lane_line, frame_n)
         return with_text
+
+
+def no_ticks(axes):
+    '''
+    Removes ticks and related numbers from both axis of the given matplotlib.axes.Axes
+    '''
+    axes.get_xaxis().set_ticks([])
+    axes.get_yaxis().set_ticks([])
+
+
+def save_undistorted_sample(f_name, mtx, dist, roi):
+    '''
+    Undirstorts the image from the given file based on camera parameters `mtx` and `dist` and saves
+    the result in a .png file under `output_dir`, along with the original (distorted) image, for comparison
+    '''
+
+    img = cv2.imread(f_name)
+    assert img is not None
+    undistorted_img = undistort_image(img, mtx, dist, roi)
+
+    # Switch from BGR to RGB for presentation in Matplotlib
+    img = switch_RGB(img)
+    undistorted_img = switch_RGB(undistorted_img)
+
+    # Makes the drawing
+    fig, (axes1, axes2) = plt.subplots(1, 2, figsize=(20, 10))
+    axes1.imshow(img)
+    axes1.set_title('Original Image', fontsize=30)
+    no_ticks(axes1)
+    axes2.imshow(undistorted_img)
+    axes2.set_title('Undistorted Image', fontsize=30)
+    no_ticks(axes2)
+    fig.tight_layout()
+
+    # Saves the drawing
+    f_basename = os.path.basename(f_name)
+    output_f_name = os.path.splitext(f_basename)[0] + '.png'
+    fig.savefig(output_dir + '/undistored-' + output_f_name)  # TODO fix all '/' such that it will work under Windows
+
+
+def save_frame(frame, f_name, title=None):
+    """
+    Saves the given image in a file with the given name, the image can be grayscale or BGR. 
+    """
+
+    if len(frame.shape) == 2:
+        frame = turn_grayscale_into_color(frame)
+    else:
+        assert len(frame.shape) == 3
+        frame = switch_RGB(frame)
+
+    image_PIL = PIL.Image.fromarray(frame)
+    image_PIL.save(f_name)
 
 
 def parse_args():
@@ -823,10 +888,15 @@ if __name__ == '__main__':
         if not read:
             break
         frame_counter += 1
+        if frame_counter == 336:
+            save_frame(frame, 'output_images/original.png', 'Original image')
         print('Processing frame', frame_counter)
         # Un-distort the frame applying camera calibration
         undistorted_img = undistort_image(frame, mtx, dist)
-        # Process teh frame and find the lane lines
+        if frame_counter == 336:
+            save_frame(undistorted_img, 'output_images/undistorted.png', 'Undistorted image')
+
+        # Process the frame and find the lane lines
         processed = processor.process_frame(undistorted_img, frame_counter)
         # Write the result to the output video stream
         vidwrite.write(processed)
