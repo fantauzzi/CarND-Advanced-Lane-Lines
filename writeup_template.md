@@ -93,13 +93,19 @@ Method `ImageProcessing.get_thresholded()` starts from a bird-eye view image (un
 
 ![alt text][image3]
 
-The method converts the image into a HSV color space, and then thresholds its individual channels and the x gradient of the V channel. The operation is repeated with different thresholding intervals to match white and yellow lines, and to be more likely to match them if they are aligned close to vertical. If a pixel passes thresholding with at least one interval, then it is included in the thresholded output. 
+The method converts the image into a HSV color space, and then thresholds its individual channels and the x gradient of the V channel. The operation is repeated with different thresholding intervals to match white and yellow lines, and to be more likely to match them if they are aligned close to vertical. If a pixel passes thresholding with at least one interval, then it is included in the thresholded output.
+
+Method `find_x_gradient()` computes and returns the absolute value of the gradient of a grayscale image in the x direction using `cv2.Sobel()` and a kernel of size 5; result is scaled to have it range between 0 and 255 in every given image.  
 
 ####4. Describe how (and identify where in your code) you identified lane-line pixels and fit their positions with a polynomial?
 
-Method `ImageProcessing.position_windows()` indentifies areas in the thresholded image that are more likely to contain pixels from the lane lines. Method `ImageProcessing.fit()` interpolates those pixels with two parabolas, one per lane line. 
+Method `ImageProcessing.position_windows()` indentifies areas in the thresholded image that are more likely to contain pixels from the lane lines. Then method `ImageProcessing.fit()` interpolates those pixels with two parabolas, one per lane line.
+
+In the image below the undistorted image is overlaid with the output of thresholding, and of the two above methods. This kind of image has been invaluable for parameters tuning and debugging. The two purple lines are the parabolas interpolating the lane lines, as seen in the bird-eye perspective. Rectangles delimit areas of the image (sliding windows) believed to contain pixels belonging to lane lines.   
 
 ![alt text][image5]
+
+Method `ImageProcessing.position_windows()` computes as follows.
 
 ####5. Describe how (and identify where in your code) you calculated the radius of curvature of the lane and the position of the vehicle with respect to center.
 
