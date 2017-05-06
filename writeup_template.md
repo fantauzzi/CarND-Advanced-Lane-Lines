@@ -87,7 +87,7 @@ Image below shows the transformation result on a camera frame.
 
 I ensured the image maintains the original resolution after transformation (1280x720 pixels), which allows me to overlay the resulting image on the camera image, very useful for subsequent parameters tuning and debugging.
 
-####3. Describe how (and identify where in your code) you used color transforms, gradients or other methods to create a thresholded binary image.  Provide an example of a binary image result.
+#### 3. Describe how (and identify where in your code) you used color transforms, gradients or other methods to create a thresholded binary image.  Provide an example of a binary image result.
 
 Method `ImageProcessing.get_thresholded()` starts from a bird-eye view image (undistorted and perspective transformed), and thresholds it producing a black-and-white image with the same resolution. Image below is an example of the output.
 
@@ -97,7 +97,7 @@ The method converts the image into a HSV color space, and then thresholds its in
 
 Method `find_x_gradient()` computes and returns the absolute value of the gradient of a grayscale image in the x direction using `cv2.Sobel()` and a kernel of size 5; result is scaled to have it range between 0 and 255 in every given image.  
 
-####4. Describe how (and identify where in your code) you identified lane-line pixels and fit their positions with a polynomial?
+#### 4. Describe how (and identify where in your code) you identified lane-line pixels and fit their positions with a polynomial.
 
 Method `ImageProcessing.position_windows()` indentifies areas in the thresholded image that are more likely to contain pixels from the lane lines. Then method `ImageProcessing.fit()` interpolates those pixels with two parabolas, one per lane line.
 
@@ -105,11 +105,49 @@ In the image below the undistorted image is overlaid with the output of threshol
 
 ![alt text][image5]
 
-Method `ImageProcessing.position_windows()` computes as follows.
+Method `ImageProcessing.position_windows()` looks for thresholded pixels likely to be part of either lane line starting from the bottom of the image, and moving upward. It partitions the image in 9 horizontal bands of the same height, and in every band it slides a window in the surrounding of a given x coordinate (let's call it x0), looking for the lane line pixels. By limiting the search to those surroundings, it performs faster than looking in the whole band.
+
+In the first image frame, to find x0 for the lowest band and the left lane line, it convolves a filter with Gaussian shape with the lowest left eighth of the image (highlighted in the picture below), and sets x0 to the value of x that maximises the convolution result. It does the same on the lowest right eighth of the image to find the x0 for the right lane line at the bottom band. Implementation of this is in method `LanelLine.recenter()`. Chart below shows the adopted Gaussian filter.
+
+Method `ImageProcessing.position_windows()` then starts looking in every band starting from the bottom; it slides a rectangular window in the surrounding of x0 finding the window position that maximises convolution with the Gaussian filter. Thresholded pixels that are inside the window are believed to be part of the lane line. However, if the result of convolution is below a set threshold, the window is marked as a bad match, and pixels inside it are ignored instead.
+
+After finding the optimal sliding window positions for the left and right lane lines, it proceeds with the next band higher up. Now as x0 for that band and lane line it uses the centre of the highest window in a band below which was not a bad match.
+
+If the windows at the bottom band were good match, the respective x0 will be kept to process the bottom band of the next frame; if either of them was a bad match, then processing of the next frame will re-calculate its x0 like for the first frame, i.e. convolving the whole lowest left or right eighth of the image.
+
+Once determination of sliding windows is complete for the frame in every band, method `ImageProcessing.fit()` interpolates thresholded pixels that are in any window, for the left and right lane line respectively. Interpolation is done by least-square mean with a parabola. I have experimented with RANSAC, but while it would correctly ignore many outliers, it also had a tendency to ignore pixels that are part of the lane line, when the lane line is bent.
+
+After interpolation, method `ImageProcessing.fit()` calls `LaneLine.check_reliability()` and `LaneLine.check_reliability_against()` to evaluate the goodness of the determined lane lines. Those two methods apply a number of criteria such as how many sliding windows were marked as bad match, the lane width, respective radius of curvature of the two lane lines. As a result, interpolated lane lines that don't pass the criteria are marked as unreliable. An unreliable lane line in a given frame is replaced by the same lane line in the previous frame.
+
+In order to smooth drawing of the result from frame to frame, method `LaneLine.fit()` weight averages the interpolated parabola with the one from the previous frame. More specifically, let `coefficients` be a Numpy array with the coefficients of the interpolated parabola, like `[a, b, c]` where `x=a*(y**2)+b*y+c`, and let `prev_coefficients` be the coefficients of the corresponding parabola from the previous frame, then `coefficients` is updated as:
+ 
+ `coefficients = (1-smoothing) * coefficients + smoothing * prev_coefficients`
+ 
+ and `prev_coefficients` as:
+ 
+ `prev_coefficients = coefficients`
+ 
+ where `smoothing` is a set floating point number in the interval `[0, 1)`; when it is closer to 1, smoothing is more effective, but interpolated lane lines may take more frames to catch up with actual lane lines, that are moving and bending in the image. 
 
 ####5. Describe how (and identify where in your code) you calculated the radius of curvature of the lane and the position of the vehicle with respect to center.
 
-I did this in lines # through # in my code in `my_other_file.py`
+Function `measure_curvature(coefficients, y0, mx, my)` calculates and returns the curvature radius, in meters, for the parabola with given `coefficients`, as measured at the y coordinate `y0`.
+
+The coefficients and `y0` are expressed in pixels, i.e. assuming the parabola is drawn in a pixmap, and the function performs the necessary conversions from pixels to meters, using the given conversion factors `mx` and `my`. They are given in meters/pixel, and state, for one pixel in the bird-eye view image, to how many meters it corresponds on the road. 
+
+I estimated `mx` and `my` based on images taken from the camera, and assumptions on the lane width and lane line markings length, as expected on California highways. I have set them to 3.66/748 and 3.48/93 meters/pixel respectively.
+
+The formula to compute the curvature radius, as implemented, is:
+
+```
+a = mx / (my ** 2) * coefficients[0]
+b = mx / my * coefficients[1]
+Y0 = y0 * my
+
+radius = ((1 + (2 * a * Y0 + b) ** 2) ** 1.5) / (2 * a)
+```
+
+It first converts the parabola reference system from pixels to meters, and then computes the radius. As one may expect, it doesn't depend on the third parabola coefficient `coefficients[2]`.
 
 ####6. Provide an example image of your result plotted back down onto the road such that the lane area is identified clearly.
 
