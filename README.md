@@ -1,19 +1,9 @@
-## Advanced Lane Finding
-[![Udacity - Self-Driving Car NanoDegree](https://s3.amazonaws.com/udacity-sdc/github/shield-carnd.svg)](http://www.udacity.com/drive)
+## Writeup Template
+### You can use this file as a template for your writeup if you want to submit it as a markdown file, but feel free to use some other method and submit a pdf if you prefer.
 
-
-In this project, your goal is to write a software pipeline to identify the lane boundaries in a video, but the main output or product we want you to create is a detailed writeup of the project.  Check out the [writeup template](https://github.com/udacity/CarND-Advanced-Lane-Lines/blob/master/writeup_template.md) for this project and use it as a starting point for creating your own writeup.  
-
-Creating a great writeup:
 ---
-A great writeup should include the rubric points as well as your description of how you addressed each point.  You should include a detailed description of the code used in each step (with line-number references and code snippets where necessary), and links to other supporting documents or external references.  You should include images in your writeup to demonstrate how your code works with examples.  
 
-All that said, please be concise!  We're not looking for you to write a book here, just a brief description of how you passed each rubric point, and references to the relevant code :). 
-
-You're not required to use markdown for your writeup.  If you use another method please just submit a pdf of your writeup.
-
-The Project
----
+**Advanced Lane Finding Project**
 
 The goals / steps of this project are the following:
 
@@ -26,10 +16,161 @@ The goals / steps of this project are the following:
 * Warp the detected lane boundaries back onto the original image.
 * Output visual display of the lane boundaries and numerical estimation of lane curvature and vehicle position.
 
-The images for camera calibration are stored in the folder called `camera_cal`.  The images in `test_images` are for testing your pipeline on single frames.  If you want to extract more test images from the videos, you can simply use an image writing method like `cv2.imwrite()`, i.e., you can read the video in frame by frame as usual, and for frames you want to save for later you can write to an image file.  
+[//]: # (Image References)
 
-To help the reviewer examine your work, please save examples of the output from each stage of your pipeline in the folder called `ouput_images`, and include a description in your writeup for the project of what each image shows.    The video called `project_video.mp4` is the video your pipeline should work well on.  
+[image1]: ./output_images/undistored-calibration2.png "Undistorted calibration image"
+[image2]: ./output_images/undistorted.png "Undistorted frame"
+[image3]: ./output_images/thresholded.png "Thresholded"
+[image4]: ./output_images/top_view.png "Bird-eye view"
+[image5]: ./output_images/interpolated.png "Interpolated lane lines"
+[image6]: ./examples/example_output.jpg "Output"
+[video1]: ./project_video.mp4 "Video"
 
-The `challenge_video.mp4` video is an extra (and optional) challenge for you if you want to test your pipeline under somewhat trickier conditions.  The `harder_challenge.mp4` video is another optional challenge and is brutal!
+## [Rubric](https://review.udacity.com/#!/rubrics/571/view) Points
+### Here I will consider the requirements individually and describe how I addressed them in my implementation.  
 
-If you're feeling ambitious (again, totally optional though), don't stop there!  We encourage you to go out and take video of your own, calibrate your camera and show us how you would implement this project from scratch!
+---
+### Writeup / README
+
+#### 1. Provide a Writeup / README that includes all the rubric points and how you addressed each one.  You can submit your writeup as markdown or pdf.
+
+You're reading it!
+### Camera Calibration
+
+#### 1. Briefly state how you computed the camera matrix and distortion coefficients. Provide an example of a distortion corrected calibration image.
+
+Function `calibrate_camera()` reads JPEG files from a given directory and uses them to calculate the camera calibration parameters.
+
+It converts every image to grayscale and then finds the corners of a checkered calibration pattern with `cv2.findChessboardCorners()`. For every input image, it compiles the list of found corner coordinates (image points), and the coordinates those points should have after distortion correction (object points). The function then calls `cv2.calibrateCamera()`, which compares the found image points coordinates with the object points coordinates, and outputs the camera matrix and distortion coefficients. After that, it calls `cv2.getOptimalNewCameraMatrix()` to ensure every pixel from the original image is still in the undistorted image (at the expense of possible black pixels at the edges of the undistorted image).
+ 
+ Before returning the required parameters and camera matrix, function `calibrate_camera()` evaluates how good they are: it uses them to transform the object points into image points, with `cv2.projectPoints()`, and then it measures the average distance between the transformed points and the respective actual image points (as detected in the calibration images). The closer to 0 the average distance, the better the calibration quality. This measure could be used to calibrate the camera with different and/or additional images, to see if the calibration result improves.
+ 
+ The image below shows one of the calibration images, and its undistorted version after camera calibration. The image has been produced with function `save_undistorted_sample()`
+
+![alt text][image1]
+
+### Pipeline (single images)
+
+#### 1. Provide an example of a distortion-corrected image.
+After camera calibration, a loop in `main.py` processes video frames one at a time. It undistorts the frame calling `undistort_image()` and then passes the undistorted frame to method `ImageProcessing.process_frame()`. The image below is a frame as returned by `undistort_image()`.
+
+![alt text][image2]
+
+#### 2. Describe how (and identify where in your code) you performed a perspective transform and provide an example of a transformed image.
+
+Most of the image elaboration is done in two classes, `ImageProcessing`, that drives every step of the processing and stores the resulting images, and LaneLine, which finds lane line markers by interpolation and stores the results.
+ 
+Method `ImageProcessing.get_top_view()` transforms the image perspective, going from the camera viewpoint to a bird-eye view. In such a way, lines that are parallel on the road and converge to a point in the camera perspective, are parallel again in the transformed image. Previous camera calibration and image undistortion are instrumental to get lines that are parallel on the road actually parallel in the bird-eye view.
+
+For perspective transformation I used OpenCV functions `cv2.getPerspectiveTransform()` and `cv2.warpPerspective()`: the former computes a transformation matrix, and the latter applies it to the (undistorted) image.
+
+In order to compute the transformation matrix, OpenCV requires coordinates of four points on the image, and corresponding coordinates after transformation.
+
+This is how the four points on the image are chosen. Starting from an undistorted camera image with straight lane lines, and with the help of a graphics editor, I have chosen a pair of points on each lane, that after perspective transformation should be the vertices of a rectangle; see image below, where the for points are named A, B, C and D.
+
+The program determines the intersection of the two lines going through the two pairs of points respectively (AD and BC), obtaining the vanishing point of the camera perspective, V in the image above. The program then computes four points to be used for perspective transformation, A' and D' laying along the AV line, and B' and C' laying along the BV line, such that after transformation they should delimit a rectangle.
+
+That way, once I set the four points A, B, C and D, I could easily tune the distance of segment D'C' from the top of the image, and of segment A'B' from the bottom. At the bottom, I wanted to leave the car hood out of the transformed image; at the top, I wanted to include as much as possible of the road, and the lane lines, before they become too blurry to be useful for further processing. 
+
+Table below lists coordinates of the four points, before and after perspective transformation.    
+
+| Source        | Destination   | 
+|:-------------:|:-------------:| 
+| 585, 460      | 320, 0        | 
+| 203, 720      | 320, 720      |
+| 1127, 720     | 960, 720      |
+| 695, 460      | 960, 0        |
+
+![alt text][image4]
+
+I ensured the image maintains the original resolution after transformation (1280x720 pixels), which allows me to overlay the resulting image on the camera image, very useful for subsequent parameters tuning and debugging.
+
+#### 3. Describe how (and identify where in your code) you used color transforms, gradients or other methods to create a thresholded binary image.  Provide an example of a binary image result.
+
+Method `ImageProcessing.get_thresholded()` starts from a bird-eye view image (undistorted and perspective transformed), and thresholds it producing a black-and-white image with the same resolution. Image below is an example of the output.
+
+![alt text][image3]
+
+The method converts the image into a HSV color space, and then thresholds its individual channels and the x gradient of the V channel. The operation is repeated with different thresholding intervals to match white and yellow lines, and to be more likely to match them if they are aligned close to vertical. If a pixel passes thresholding with at least one interval, then it is included in the thresholded output.
+
+Method `find_x_gradient()` computes and returns the absolute value of the gradient of a grayscale image in the x direction using `cv2.Sobel()` and a kernel of size 5; result is scaled to range between 0 and 255 in every given image.  
+
+#### 4. Describe how (and identify where in your code) you identified lane-line pixels and fit their positions with a polynomial.
+
+Method `ImageProcessing.position_windows()` identifies areas in the thresholded image that are likely to contain pixels from the lane lines. Then method `ImageProcessing.fit()` interpolates those pixels with two parabolas, one per lane line.
+
+In the image below the undistorted image is overlaid with the output of thresholding, and of the two above methods. This kind of image has been invaluable for parameters tuning and debugging. The two purple lines are the parabolas interpolating the lane lines, as seen in the bird-eye perspective. Rectangles delimit areas of the image (sliding windows) believed to contain pixels belonging to lane lines. The number next to the sliding window is an estimate of its goodness, the higher the number, the more lane line points are probably in it. Sliding windows with a goodness under a certain threshold are ignored in further processing, and drawn in red in the image below.  
+
+![alt text][image5]
+
+Method `ImageProcessing.position_windows()` looks for thresholded pixels likely to be part of either lane line starting from the bottom of the image, and moving upward. It partitions the image in 9 horizontal bands of the same height, and in every band it slides a window in the surrounding of a given x coordinate (let's call it x0), looking for lane line pixels. By limiting the search to those surroundings, it performs faster than looking in the whole band.
+
+In the first image frame, to find x0 for the lowest band and the left lane line, it convolves a filter with Gaussian shape with the lowest left eighth of the image (highlighted in the picture below), and sets x0 to the value of x that maximises the convolution result. It does the same on the lowest right eighth of the image to find x0 for the right lane line at the bottom band. Implementation of this is in method `LanelLine.recenter()`. Chart below shows the adopted Gaussian filter.
+
+Method `ImageProcessing.position_windows()` then starts looking in every band starting from the bottom; it slides a rectangular window in a given surrounding of x0 finding the window position that maximises convolution with the Gaussian filter. Thresholded pixels that are inside the window are believed to be part of the lane line. However, if the result of convolution is below a set threshold, the window is marked as a bad match, and pixels inside it are ignored instead (rectangles in red in the image above).
+
+After finding the optimal sliding window positions for the left and right lane lines, it proceeds with the next band higher up. Now as x0 for that band and lane line it uses the centre of the highest window in a band below which was not a bad match.
+
+If the windows at the bottom band were good match, the respective x0 will be kept to process the bottom band of the next frame; if either of them was a bad match, then processing of the next frame will re-calculate its x0 like for the first frame, i.e. convolving the whole lowest left or right eighth of the image.
+
+Once determination of sliding windows is complete for the frame in every band, method `ImageProcessing.fit()` interpolates thresholded pixels that are in any window, for the left and right lane line respectively. Interpolation is done by Least Squares Mean with a parabola. I have experimented with RANSAC, but while it would correctly ignore many outliers, it also had a tendency to ignore pixels that are part of the lane line, when the lane line is bent.
+
+After interpolation, method `ImageProcessing.fit()` calls `LaneLine.check_reliability()` and `LaneLine.check_reliability_against()` to evaluate the goodness of the determined lane lines. Those two methods apply a number of criteria such as how many sliding windows were marked as bad match, the lane width, respective radius of curvature of the two lane lines. As a result, interpolated lane lines that don't pass the criteria are marked as unreliable. An unreliable lane line in a given frame is replaced by the same lane line in the previous frame.
+
+In order to smooth drawing of the result from frame to frame, method `LaneLine.fit()` weight averages the interpolated parabola with the one from the previous frame. More specifically, let `coefficients` be a Numpy array with the coefficients of the interpolated parabola, like `[a, b, c]` where `x=a*(y**2)+b*y+c`, and let `prev_coefficients` be the coefficients of the corresponding parabola from the previous frame, then `coefficients` is updated as:
+ 
+ `coefficients = (1-smoothing) * coefficients + smoothing * prev_coefficients`
+ 
+ and `prev_coefficients` as:
+ 
+ `prev_coefficients = coefficients`
+ 
+ where `smoothing` is a set floating point number in the interval `[0, 1)`; when it is closer to 1, smoothing is more effective, but interpolated lane lines may take more frames to catch up with actual lane lines, that are moving and bending in the image. In the current implementation it is set to 0.5. 
+
+#### 5. Describe how (and identify where in your code) you calculated the radius of curvature of the lane and the position of the vehicle with respect to center.
+
+Function `measure_curvature(coefficients, y0, mx, my)` calculates and returns the curvature radius, in meters, for the parabola with given `coefficients`, as measured at the y coordinate `y0`.
+
+The coefficients and `y0` are expressed in pixels, i.e. assuming the parabola is drawn in a pixmap, and the function performs the necessary conversions from pixels to meters, using the given conversion factors `mx` and `my`. The latter are given in meters/pixel, and state, for one pixel in the bird-eye view image, to how many meters it corresponds on the road. 
+
+I estimated `mx` and `my` based on images taken from the camera, and assumptions on the lane width and lane line markings length, as expected on California highways. I have set them to 3.66/748 and 3.48/93 meters/pixel respectively.
+
+The formula to compute the curvature radius, as implemented, is:
+
+```
+a = mx / (my ** 2) * coefficients[0]
+b = mx / my * coefficients[1]
+Y0 = y0 * my
+
+radius = ((1 + (2 * a * Y0 + b) ** 2) ** 1.5) / (2 * a)
+```
+
+It first converts the parabola reference system from pixels to meters, and then computes the radius. As one may expect, it doesn't depend on the third parabola coefficient `coefficients[2]`.
+
+#### 6. Provide an example image of your result plotted back down onto the road such that the lane area is identified clearly.
+
+Method `ImageProcessing.overlay_lanes_in_perspective()` paints an overlay of the lane on the (undistorted) camera image, and returns the result. It draws a polygon with `cv2.fillPoly()` on a bird-eye view, and then transforms it to the camera perspective using the inverse of the transformation matrix previously used to go to the bird-eye view.
+
+Image below is an example of the frame as produced for the output video.
+
+![alt text][image6]
+
+---
+
+### Pipeline (video)
+
+#### 1. Provide a link to your final video output.  Your pipeline should perform reasonably well on the entire project video (wobbly lines are ok but no catastrophic failures that would cause the car to drive off the road!).
+
+Video clips with the program output can be found [here](./project_video.mp4) and, for a more "difficult" input, [here](./challenge_video.mp4).
+
+---
+
+### Discussion
+
+#### 1. Briefly discuss any problems / issues you faced in your implementation of this project.  Where will your pipeline likely fail?  What could you do to make it more robust?
+
+Profiling of the code indicates that thresholding of the image takes most of the execution time. In the current implementation, it is done on the whole frame. A possible improvement is to threshold only those parts of the image that might fall into one of the sliding windows.
+
+While the algorithmic approach may seem quite general, its main weekness is the needed tuning of thresholding parameters, used to detect lane lines of different colors and orientation, in different light conditions and on different pavement color. The tuning allows the program to perform well on the adopted input, but may be brittle when confronted with input taken on different roads, light and atmospheric conditions.
+
+A more robust approach may try to detect lane lines or segments of lane lines before interpolation, e.g. through a Hough transform. Interpolation would take as input the Hough transform output, possibly using splines instead of parabolas, or could be skipped altogether.

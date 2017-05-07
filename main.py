@@ -821,7 +821,7 @@ def save_frame(frame, f_name, title=None):
         frame = switch_RGB(frame)
 
     image_PIL = PIL.Image.fromarray(frame)
-    image_PIL.save(f_name)
+    image_PIL.save(f_name)  # TODO change to OpenCV imwrite
 
 
 def parse_args():
