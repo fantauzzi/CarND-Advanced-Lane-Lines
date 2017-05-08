@@ -23,6 +23,7 @@ The goals / steps of this project are the following:
 [image6]: ./examples/example_output.jpg "Output"
 [image7]: ./examples/thresholded_rec.png "Finding lane line starting point"
 [image8]: ./examples/filter.png "Gaussian filter"
+[image9]: ./examples/lane.png "Projected lane"
 [video1]: ./project_video.mp4 "Video"
 
 ## [Rubric](https://review.udacity.com/#!/rubrics/571/view) Points
@@ -157,9 +158,9 @@ It first converts the parabola reference system from pixels to meters, and then 
 
 Method `ImageProcessing.overlay_lanes_in_perspective()` paints an overlay of the lane on the (undistorted) camera image, and returns the result. It draws a polygon with `cv2.fillPoly()` on a bird-eye view, and then transforms it to the camera perspective using the inverse of the transformation matrix previously used to go to the bird-eye view.
 
-Image below is an example of the frame as produced for the output video.
+Image below is an example of the frame as produced for the output video. On top it reports a progressive frame counter, the curvature radius (a negative number indicates that the center of curvature is to the left), the lane width and the distance of the car from the center of the lane (a negative number indicates the car is to the left of the lane center).
 
-![alt text][image6]
+![alt text][image9]
 
 ---
 
@@ -175,8 +176,8 @@ Video clips with the program output can be found [here](./project_video.mp4) and
 
 #### 1. Briefly discuss any problems / issues you faced in your implementation of this project.  Where will your pipeline likely fail?  What could you do to make it more robust?
 
-Profiling of the code indicates that thresholding of the image takes most of the execution time. In the current implementation, it is done on the whole frame. A possible improvement is to threshold only those parts of the image that might fall into one of the sliding windows.
+Source code profiling indicates that thresholding of the image takes most of the execution time. In the current implementation, it is done on the whole frame. A possible improvement is to threshold only those parts of the image that might fall into one of the sliding windows.
 
-While the algorithmic approach may seem quite general, its main weekness is the needed tuning of thresholding parameters, used to detect lane lines of different colors and orientation, in different light conditions and on different pavement color. The tuning allows the program to perform well on the adopted input, but may be brittle when confronted with input taken on different roads, light and atmospheric conditions.
+While the algorithmic approach may seem quite general, itrs main weekness is the needed tuning of thresholding parameters, used to detect lane lines of different colors and orientation, in different light conditions and on different pavement color. Tuning allows the program to perform well on the adopted input, but may be brittle when confronted with input taken on different roads, light and atmospheric conditions.
 
 A more robust approach may try to detect lane lines or segments of lane lines before interpolation, e.g. through a Hough transform. Interpolation would take as input the Hough transform output, possibly using splines instead of parabolas, or could be skipped altogether.

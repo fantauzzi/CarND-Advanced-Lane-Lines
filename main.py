@@ -3,13 +3,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 import os
 import glob
-import math
 import time
 import copy
 import argparse
 import PIL
-import matplotlib.gridspec as gridspec
-from matplotlib.widgets import Slider, RadioButtons
+import sys
 from scipy.signal import gaussian
 from sklearn import linear_model
 from sklearn.preprocessing import PolynomialFeatures
@@ -247,11 +245,9 @@ class LaneLine:
         """
         if abs(self._curvature_radius) < 50:
             self._is_unreliable = True
-            print(1)
         good_centroids_count = sum(centroid.is_good() for centroid in self._centroids)
         if good_centroids_count < 2:
             self._is_unreliable = True
-            print(2)
         return self._is_unreliable
 
     def check_reliability_against(self, lane_line):
@@ -308,7 +304,7 @@ class LaneLine:
             lane_right.mark_unreliable()
 
         ''' If both lane lines are bent, then their curvature radius cannot be too different '''
-        if abs_radius1 < bent and abs_radius2 < bent and (abs_ratio > 1.59 or abs_ratio < 1 / 1.59):
+        if abs_radius1 < bent and abs_radius2 < bent and (abs_ratio > 1.59 or abs_ratio < 1 / 1.59):  # 1.59
             mark_both_unreliable()
             return
 
@@ -466,50 +462,51 @@ class ImageProcessing:
         self._lanes_points = None
 
     def get_top_view(self):
+        assert self._unprocessed is not None
+        image = self._unprocessed
         if self._top_view is None:
-            assert self._unprocessed is not None
-            image = self._unprocessed
-            target_shape = (image.shape[0], image.shape[1])  # (rows, columns)
+            if self._M is None:
+                target_shape = (image.shape[0], image.shape[1])  # (rows, columns)
 
-            # Begin by finding the perspective vanishing point
-            lane_l = ((264, 688), (621, 431))  # Two points identifying the line going along the left lane marking
-            lane_r = ((660, 431), (1059, 688))  # Two points identifying the line going along right lane marking
-            v_point = find_intersect(*lane_l,
-                                     *lane_r)  # Intersection of the two lines above (perspective vanishing point)
+                # Begin by finding the perspective vanishing point
+                lane_l = ((264, 688), (621, 431))  # Two points identifying the line going along the left lane marking
+                lane_r = ((660, 431), (1059, 688))  # Two points identifying the line going along right lane marking
+                v_point = find_intersect(*lane_l,
+                                         *lane_r)  # Intersection of the two lines above (perspective vanishing point)
 
-            # Alternative approach, commented out below, with lines going from vanishing points to lower image corners
-            '''lane_l2 = (
-            (0, target_shape[0] - 1), v_point)  # Two points identifying the line going along the left lane marking
-            lane_r2 = ((target_shape[1] - 1, target_shape[0] - 1),
-                       (v_point))  # Two points identifying the line going along right lane marking'''
+                # Alternative approach, commented out below, with lines going from vanishing points to lower image corners
+                '''lane_l2 = (
+                (0, target_shape[0] - 1), v_point)  # Two points identifying the line going along the left lane marking
+                lane_r2 = ((target_shape[1] - 1, target_shape[0] - 1),
+                           (v_point))  # Two points identifying the line going along right lane marking'''
 
-            # Determine a quadrangle in the source image
-            source_h = image.shape[0]
-            y1, y2 = round((source_h - v_point[1]) * .13 + v_point[1]), source_h - 51
-            assert v_point[1] <= y1 <= source_h - 1
-            assert v_point[1] <= y2 <= source_h - 1
-            source = np.float32([
-                [find_x_given_y(y2, *lane_l), y2],
-                [find_x_given_y(y1, *lane_l), y1],
-                [find_x_given_y(y1, *lane_r), y1],
-                [find_x_given_y(y2, *lane_r), y2]
-            ])
+                # Determine a quadrangle in the source image
+                source_h = image.shape[0]
+                y1, y2 = round((source_h - v_point[1]) * .13 + v_point[1]), source_h - 51
+                assert v_point[1] <= y1 <= source_h - 1
+                assert v_point[1] <= y2 <= source_h - 1
+                source = np.float32([
+                    [find_x_given_y(y2, *lane_l), y2],
+                    [find_x_given_y(y1, *lane_l), y1],
+                    [find_x_given_y(y1, *lane_r), y1],
+                    [find_x_given_y(y2, *lane_r), y2]
+                ])
 
-            # Determine the corresponing quandrangle in the target (destination) image
-            target = np.float32([[source[0, 0], target_shape[0] - 1],
-                                 [source[0, 0], 0],
-                                 [source[3, 0], 0],
-                                 [source[3, 0], target_shape[0] - 1]])
+                # Determine the corresponing quandrangle in the target (destination) image
+                target = np.float32([[source[0, 0], target_shape[0] - 1],
+                                     [source[0, 0], 0],
+                                     [source[3, 0], 0],
+                                     [source[3, 0], target_shape[0] - 1]])
 
-            # Alternative approach, commented out below
-            '''target = np.float32([[0, target_shape[0] - 1],
-                                 [0, 0],
-                                 [target_shape[1] - 1, 0],
-                                 [target_shape[1] - 1, target_shape[0] - 1]])'''
+                # Alternative approach, commented out below
+                '''target = np.float32([[0, target_shape[0] - 1],
+                                     [0, 0],
+                                     [target_shape[1] - 1, 0],
+                                     [target_shape[1] - 1, target_shape[0] - 1]])'''
 
-            # Given the source and target quadrangles, calculate the perspective transform matrix
-            source = np.expand_dims(source, 1)  # OpenCV requires this extra dimension
-            self._M = cv2.getPerspectiveTransform(src=source, dst=target)
+                # Given the source and target quadrangles, calculate the perspective transform matrix
+                source = np.expand_dims(source, 1)  # OpenCV requires this extra dimension
+                self._M = cv2.getPerspectiveTransform(src=source, dst=target)
 
             self._top_view = cv2.warpPerspective(image, self._M, image.shape[1::-1])
         return self._top_view
@@ -580,7 +577,7 @@ class ImageProcessing:
                     in that band where to look for lane lines (from previous frames), then determine it staring from the
                     hystogram of the left or right bottom quarter of the image (left or right, depending on which lane). '''
                     if lane_line.get_centroid(0) is None or not lane_line.get_centroid(0).is_good():
-                        print('Recentering lane', lane_line.get_printable_name())
+                        # print('Recentering lane', lane_line.get_printable_name())
                         lane_line.recenter(self._thresholded, self._filter)
                     starting_x = lane_line.get_bottom_x()
                 else:
@@ -622,7 +619,7 @@ class ImageProcessing:
         else:
             for i_lane, lane_line in enumerate(self._lane_lines):
                 if lane_line._is_unreliable:
-                    self._lane_lines[i_lane] = copy.deepcopy(self._prev_lane_lines[i_lane])  # !!
+                    self._lane_lines[i_lane] = copy.deepcopy(self._prev_lane_lines[i_lane])
                     self._lane_lines[i_lane].mark_unreliable()  # Make sure the lane line is still marked as unreliable
 
         # Now check the consistency of the two lane lines against each other
@@ -630,7 +627,7 @@ class ImageProcessing:
 
         for i_lane, lane_line in enumerate(self._lane_lines):
             if lane_line._is_unreliable:
-                self._lane_lines[i_lane] = copy.deepcopy(self._prev_lane_lines[i_lane])  # !!
+                self._lane_lines[i_lane] = copy.deepcopy(self._prev_lane_lines[i_lane])
                 self._lane_lines[i_lane].mark_unreliable()
             else:
                 self._prev_lane_lines[i_lane] = copy.deepcopy(lane_line)
@@ -742,8 +739,10 @@ class ImageProcessing:
         x1, x2 = get_lane_lines_position_at(self._lane_lines[0], self._lane_lines[1], image.shape[0] - 1)
         lane_width = abs(x1 - x2) * self._mx
         position = ((x1 + x2) / 2 - image.shape[1] // 2) * self._mx
+        ratio = abs(self._lane_lines[0].get_curvature())/abs(self._lane_lines[1].get_curvature())
         # top_lane_width = get_lane_width(self._lane_lines[0], self._lane_lines[1], image.shape[0] // 2) * self._mx
-        to_print = '#{:d} Curvature radius={:5.0f}m, Lane width={:2.2f}m, Position={:+1.2f}m'.format(frame_n,
+        to_print = '#{:d} {:2.3} Curvature radius={:+5.0f}m, Lane width={:2.2f}m, Position={:+1.2f}m'.format(frame_n,
+                                                                                                     ratio,
                                                                                                      radius,
                                                                                                      lane_width,
                                                                                                      position)
@@ -811,7 +810,7 @@ def save_undistorted_sample(f_name, mtx, dist, roi):
     # Saves the drawing
     f_basename = os.path.basename(f_name)
     output_f_name = os.path.splitext(f_basename)[0] + '.png'
-    fig.savefig(output_dir + '/undistored-' + output_f_name)  # TODO fix all '/' such that it will work under Windows
+    fig.savefig(output_dir + '/undistored-' + output_f_name)  # OO fix all '/' such that it will work under Windows
 
 
 def save_frame(frame, f_name, title=None):
@@ -895,7 +894,9 @@ if __name__ == '__main__':
         frame_counter += 1
         if frame_counter == snap:
             save_frame(frame, 'output_images/original.png', 'Original image')
-        print('Processing frame', frame_counter)
+        #print('Processing frame', frame_counter)
+        sys.stdout.write("\rProcessing frame: {0:>6}".format(frame_counter))
+        sys.stdout.flush()
         # Un-distort the frame applying camera calibration
         undistorted_img = undistort_image(frame, mtx, dist)
         if frame_counter == snap:
@@ -909,3 +910,6 @@ if __name__ == '__main__':
             pass
 
     print('\nProcessing rate {:.1f} fps'.format(frame_counter / (time.time() - start_time)))
+
+
+# TODO check frames 72 -118 advanced video
