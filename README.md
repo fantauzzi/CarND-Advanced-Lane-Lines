@@ -1,7 +1,4 @@
-## Writeup Template
-### You can use this file as a template for your writeup if you want to submit it as a markdown file, but feel free to use some other method and submit a pdf if you prefer.
-
----
+# README
 
 **Advanced Lane Finding Project**
 
@@ -18,12 +15,14 @@ The goals / steps of this project are the following:
 
 [//]: # (Image References)
 
-[image1]: ./output_images/undistored-calibration2.png "Undistorted calibration image"
-[image2]: ./output_images/undistorted.png "Undistorted frame"
-[image3]: ./output_images/thresholded.png "Thresholded"
-[image4]: ./output_images/top_view.png "Bird-eye view"
-[image5]: ./output_images/interpolated.png "Interpolated lane lines"
+[image1]: ./examples/undistored-calibration2.png "Undistorted calibration image"
+[image2]: ./examples/undistorted.png "Undistorted frame"
+[image3]: ./examples/thresholded.png "Thresholded"
+[image4]: ./examples/top_view.png "Bird-eye view"
+[image5]: ./examples/interpolated.png "Interpolated lane lines"
 [image6]: ./examples/example_output.jpg "Output"
+[image7]: ./examples/thresholded_rec.png "Finding lane line starting point"
+[image8]: ./examples/filter.png "Gaussian filter"
 [video1]: ./project_video.mp4 "Video"
 
 ## [Rubric](https://review.udacity.com/#!/rubrics/571/view) Points
@@ -52,7 +51,7 @@ It converts every image to grayscale and then finds the corners of a checkered c
 ### Pipeline (single images)
 
 #### 1. Provide an example of a distortion-corrected image.
-After camera calibration, a loop in `main.py` processes video frames one at a time. It undistorts the frame calling `undistort_image()` and then passes the undistorted frame to method `ImageProcessing.process_frame()`. The image below is a frame as returned by `undistort_image()`.
+After camera calibration, a loop in `main.py` processes video frames one at a time. It undistorts the frame calling `undistort_image()` and then passes the undistorted frame to method `ImageProcessing.process_frame()`. The image below is a camera frame as returned by `undistort_image()`.
 
 ![alt text][image2]
 
@@ -81,9 +80,11 @@ Table below lists coordinates of the four points, before and after perspective t
 | 1127, 720     | 960, 720      |
 | 695, 460      | 960, 0        |
 
+Below you can see the result of transformation to bird-eye view of an undistorted image. Pixels closer to the top are at a greater distance from the car, and are blurrier after the perspective transformation.
+
 ![alt text][image4]
 
-I ensured the image maintains the original resolution after transformation (1280x720 pixels), which allows me to overlay the resulting image on the camera image, very useful for subsequent parameters tuning and debugging.
+I ensured the image maintains its original resolution after transformation (1280x720 pixels), which allows me to overlay the resulting image on the camera image, very useful for subsequent parameters tuning and debugging.
 
 #### 3. Describe how (and identify where in your code) you used color transforms, gradients or other methods to create a thresholded binary image.  Provide an example of a binary image result.
 
@@ -99,13 +100,18 @@ Method `find_x_gradient()` computes and returns the absolute value of the gradie
 
 Method `ImageProcessing.position_windows()` identifies areas in the thresholded image that are likely to contain pixels from the lane lines. Then method `ImageProcessing.fit()` interpolates those pixels with two parabolas, one per lane line.
 
-In the image below the undistorted image is overlaid with the output of thresholding, and of the two above methods. This kind of image has been invaluable for parameters tuning and debugging. The two purple lines are the parabolas interpolating the lane lines, as seen in the bird-eye perspective. Rectangles delimit areas of the image (sliding windows) believed to contain pixels belonging to lane lines. The number next to the sliding window is an estimate of its goodness, the higher the number, the more lane line points are probably in it. Sliding windows with a goodness under a certain threshold are ignored in further processing, and drawn in red in the image below.  
+In the image below the undistorted image is overlaid with the output of thresholding, and of the two above methods. This kind of image has been invaluable for parameters tuning and debugging. The two purple lines are the parabolas interpolating the lane lines, as seen in the bird-eye perspective. Rectangles delimit areas of the image (sliding windows) believed to contain pixels belonging to lane lines. The number next to each sliding window is an estimate of its goodness, the higher the number, the more lane line points are probably in it. Sliding windows with a goodness under a certain threshold are ignored in further processing, and drawn in red in the image below.  
 
 ![alt text][image5]
 
 Method `ImageProcessing.position_windows()` looks for thresholded pixels likely to be part of either lane line starting from the bottom of the image, and moving upward. It partitions the image in 9 horizontal bands of the same height, and in every band it slides a window in the surrounding of a given x coordinate (let's call it x0), looking for lane line pixels. By limiting the search to those surroundings, it performs faster than looking in the whole band.
 
-In the first image frame, to find x0 for the lowest band and the left lane line, it convolves a filter with Gaussian shape with the lowest left eighth of the image (highlighted in the picture below), and sets x0 to the value of x that maximises the convolution result. It does the same on the lowest right eighth of the image to find x0 for the right lane line at the bottom band. Implementation of this is in method `LanelLine.recenter()`. Chart below shows the adopted Gaussian filter.
+In the first image frame, to find x0 for the lowest band and the left lane line, it convolves a filter with Gaussian shape with the lowest left eighth of the image (highlighted in blue in the picture below), and sets x0 to the value of x that maximises the convolution result.
+
+![alt text][image7]
+
+It does the same on the lowest right eighth of the image to find x0 for the right lane line at the bottom band. Implementation of this is in method `LanelLine.recenter()`. Chart below shows the adopted Gaussian filter.
+![alt text][image8]
 
 Method `ImageProcessing.position_windows()` then starts looking in every band starting from the bottom; it slides a rectangular window in a given surrounding of x0 finding the window position that maximises convolution with the Gaussian filter. Thresholded pixels that are inside the window are believed to be part of the lane line. However, if the result of convolution is below a set threshold, the window is marked as a bad match, and pixels inside it are ignored instead (rectangles in red in the image above).
 

@@ -740,8 +740,8 @@ def main():
     # save_undistorted_sample(calibration_dir + '/calibration2.jpg', mtx, dist, roi)
 
     if True:
-        test_image = 'test_images/yellow.png'
-        # test_image = 'test_images/straight_lines2.jpg'
+        # test_image = 'test_images/yellow.png'
+        test_image = 'test_images/straight_lines2.jpg'
         img = cv2.imread(test_image)
         assert img is not None
         # Un-distort it applying camera calibration

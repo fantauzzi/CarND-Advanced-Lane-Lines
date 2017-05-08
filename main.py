@@ -15,6 +15,8 @@ from sklearn import linear_model
 from sklearn.preprocessing import PolynomialFeatures
 from sklearn.pipeline import make_pipeline
 
+snap = 197
+
 
 def switch_RGB(img):
     """
@@ -173,7 +175,6 @@ def measure_curvature(coefficients, y0, mx, my):
 
     a = mx / (my ** 2) * coefficients[0]
     b = mx / my * coefficients[1]
-    c = coefficients[2]
     Y0 = y0 * my
 
     radius = ((1 + (2 * a * Y0 + b) ** 2) ** 1.5) / (2 * a)
@@ -754,10 +755,10 @@ class ImageProcessing:
         self._unprocessed = frame
         self.invalidate()
         self.get_top_view()
-        if frame_n == 336:
+        if frame_n == snap:
             save_frame(self._top_view, 'output_images/top_view.png', 'Top view')
         self.get_thresholded()
-        if frame_n == 336:
+        if frame_n == snap:
             save_frame(self._thresholded, 'output_images/thresholded.png', 'Thresholded')
         self.position_windows()
         self.fit_lane_lines()
@@ -765,9 +766,13 @@ class ImageProcessing:
         with_thresholded = self.overlay_thresholded(frame_with_lane)
         with_windows = self.overlay_windows(with_thresholded)
         with_lane_line = self.overlay_lane_lines(with_windows)
-        if frame_n == 336:
+        if frame_n == snap:
             save_frame(with_lane_line, 'output_images/interpolated.png', 'Interpolated lanes')
         with_text = self.overlay_additional_info(with_lane_line, frame_n)
+        if frame_n == snap:
+            out = self.overlay_lanes_in_perspective(frame)
+            out = self.overlay_additional_info(out, frame_n)
+            save_frame(out, 'output_images/lane.png', 'Lane')
         return with_text
 
 
@@ -888,12 +893,12 @@ if __name__ == '__main__':
         if not read:
             break
         frame_counter += 1
-        if frame_counter == 336:
+        if frame_counter == snap:
             save_frame(frame, 'output_images/original.png', 'Original image')
         print('Processing frame', frame_counter)
         # Un-distort the frame applying camera calibration
         undistorted_img = undistort_image(frame, mtx, dist)
-        if frame_counter == 336:
+        if frame_counter == snap:
             save_frame(undistorted_img, 'output_images/undistorted.png', 'Undistorted image')
 
         # Process the frame and find the lane lines
