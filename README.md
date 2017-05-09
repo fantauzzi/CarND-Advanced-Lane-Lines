@@ -20,10 +20,12 @@ The goals / steps of this project are the following:
 [image3]: ./examples/thresholded.png "Thresholded"
 [image4]: ./examples/top_view.png "Bird-eye view"
 [image5]: ./examples/interpolated.png "Interpolated lane lines"
-[image6]: ./examples/example_output.jpg "Output"
 [image7]: ./examples/thresholded_rec.png "Finding lane line starting point"
 [image8]: ./examples/filter.png "Gaussian filter"
 [image9]: ./examples/lane.png "Projected lane"
+[image10]: ./examples/unwarped-1.png "Vanishing point"
+[image11]: ./examples/unwarped-2.png "Source points"
+
 [video1]: ./project_video.mp4 "Video"
 
 ## [Rubric](https://review.udacity.com/#!/rubrics/571/view) Points
@@ -68,18 +70,22 @@ In order to compute the transformation matrix, OpenCV requires coordinates of fo
 
 This is how the four points on the image are chosen. Starting from an undistorted camera image with straight lane lines, and with the help of a graphics editor, I have chosen a pair of points on each lane, that after perspective transformation should be the vertices of a rectangle; see image below, where the for points are named A, B, C and D.
 
-The program determines the intersection of the two lines going through the two pairs of points respectively (AD and BC), obtaining the vanishing point of the camera perspective, V in the image above. The program then computes four points to be used for perspective transformation, A' and D' laying along the AV line, and B' and C' laying along the BV line, such that after transformation they should delimit a rectangle.
+![alt text][image10]
+
+The program determines the intersection of the two lines going through the two pairs of points respectively (AD and BC), obtaining the vanishing point of the camera perspective, V in the image above. The program then computes four points to be used for perspective transformation, A' and D' laying along the AV line, and B' and C' laying along the BV line, such that after transformation they should delimit a rectangle. See in image below.
+
+![alt text][image11]
 
 That way, once I set the four points A, B, C and D, I could easily tune the distance of segment D'C' from the top of the image, and of segment A'B' from the bottom. At the bottom, I wanted to leave the car hood out of the transformed image; at the top, I wanted to include as much as possible of the road, and the lane lines, before they become too blurry to be useful for further processing. 
 
 Table below lists coordinates of the four points, before and after perspective transformation.    
 
-| Source        | Destination   | 
-|:-------------:|:-------------:| 
-| 585, 460      | 320, 0        | 
-| 203, 720      | 320, 720      |
-| 1127, 720     | 960, 720      |
-| 695, 460      | 960, 0        |
+| Point| Source        | Target   | 
+|:---:|:-------------:|:-------------:| 
+|A'| 290.4, 669      | 290.4, 719        | 
+|B'| 1029.5, 669      | 1029.5, 719        |
+|C'| 700.4, 457     | 1029.5, 0      |
+|D'| 584.9, 457      | 290.4, 0      |
 
 Below you can see the result of transformation to bird-eye view of an undistorted image. Pixels closer to the top are at a greater distance from the car, and are blurrier after the perspective transformation.
 
@@ -111,7 +117,8 @@ In the first image frame, to find x0 for the lowest band and the left lane line,
 
 ![alt text][image7]
 
-It does the same on the lowest right eighth of the image to find x0 for the right lane line at the bottom band. Implementation of this is in method `LanelLine.recenter()`. Chart below shows the adopted Gaussian filter.
+It does the same on the lowest right eighth of the image to find x0 for the right lane line at the bottom band. Implementation of this is in method `LanelLine.recenter()`. Chart below shows values of the adopted Gaussian filter, which has size 100x1 pixels.
+
 ![alt text][image8]
 
 Method `ImageProcessing.position_windows()` then starts looking in every band starting from the bottom; it slides a rectangular window in a given surrounding of x0 finding the window position that maximises convolution with the Gaussian filter. Thresholded pixels that are inside the window are believed to be part of the lane line. However, if the result of convolution is below a set threshold, the window is marked as a bad match, and pixels inside it are ignored instead (rectangles in red in the image above).
@@ -158,9 +165,12 @@ It first converts the parabola reference system from pixels to meters, and then 
 
 Method `ImageProcessing.overlay_lanes_in_perspective()` paints an overlay of the lane on the (undistorted) camera image, and returns the result. It draws a polygon with `cv2.fillPoly()` on a bird-eye view, and then transforms it to the camera perspective using the inverse of the transformation matrix previously used to go to the bird-eye view.
 
-Image below is an example of the frame as produced for the output video. On top it reports a progressive frame counter, the curvature radius (a negative number indicates that the center of curvature is to the left), the lane width and the distance of the car from the center of the lane (a negative number indicates the car is to the left of the lane center).
+Image below is an example of the frame as produced for the output video. On top it reports a progressive frame counter, the lane curvature radius (a negative number indicates that the center of curvature is to the left), the lane width and the distance of the car from the center of the lane (a negative number indicates the car is to the left of the lane center).
+
 
 ![alt text][image9]
+
+Lane curvature radius is computed as the average between the curvatur radii of the two lane lines.
 
 ---
 

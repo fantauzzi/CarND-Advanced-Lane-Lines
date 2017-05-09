@@ -848,6 +848,21 @@ def parse_args():
     return input_fname
 
 
+def save_undistorted_frame(f_name, mtx, dist, roi):
+    img = cv2.imread(f_name)
+    assert img is not None
+    undistorted_img = undistort_image(img, mtx, dist, roi)
+
+    # Switch from BGR to RGB for presentation in Matplotlib
+    undistorted_img= switch_RGB(undistorted_img)
+
+    # Saves the undistorted image
+    f_basename = os.path.basename(f_name)
+    output_f_name = os.path.splitext(f_basename)[0] + '_undist.png'
+
+    save_frame(undistorted_img, output_f_name )
+
+
 if __name__ == '__main__':
     input_fname = parse_args()
     output_fname = 'out_' + input_fname
