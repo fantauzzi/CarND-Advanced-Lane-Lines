@@ -6,8 +6,8 @@ import glob
 import time
 import copy
 import argparse
-import PIL
 import sys
+import warnings
 from scipy.signal import gaussian
 from sklearn import linear_model
 from sklearn.preprocessing import PolynomialFeatures
@@ -143,17 +143,31 @@ def undistort_image(image, mtx, dist, roi=None):
 
 
 class Centroid:
+    """
+    A sliding windows on a set band of the image
+    """
     _min_goodness = 1
 
     def __init__(self, x, goodness):
+        """
+        :param x: x oordinate of the centre of the sliding window 
+        :param goodness: measure of goodness of the sliding window
+        """
         self.x = x
         self.goodness = goodness
 
     def is_good(self):
+        """
+        :return: True iff the goodness of the sliding window is equal or above the set threshold (`self._min_goodness'),
+         False otherwise.
+        """
         return self.goodness >= Centroid._min_goodness
 
 
 def window_mask(width, height, img_ref, center, band):
+    """
+    Returns a bitmask to identify the given window within `img_ref' (pixels belonging to the window are set to 1)
+    """
     output = np.zeros_like(img_ref)
     output[int(img_ref.shape[0] - (band + 1) * height):int(img_ref.shape[0] - band * height),
     max(0, int(center - width / 2)):min(int(center + width / 2), img_ref.shape[1])] = 1
@@ -167,7 +181,7 @@ def measure_curvature(coefficients, y0, mx, my):
     to be in a reference system in pixels.
     :param y0: the y coordinate, in pixels, of the point along the parabola where the curvature is to be computed.
     :param mx: scale for the x-axis, in meters/pixel (i.e. one pixel along the x-axis corresponds to `mx` meter).
-    :param my: scale for the y-axis, in meters/pixel (i.e. one pixel along the x-axis corresponds to `my` meter).
+    :param my: scale for the y-axis, in meters/pixel (i.e. one pixel along the y-axis corresponds to `my` meter).
     :return: the curvature radius in meters.
     """
 
@@ -181,6 +195,10 @@ def measure_curvature(coefficients, y0, mx, my):
 
 
 class LaneLine:
+    """
+    A lane line, useful to keep track of the last detected lane line from one frame to the next. It needs to be
+    sub-classed as left or right lane line before being instantiated.
+    """
     _smoothing = .5
 
     def __init__(self, windows_shape, image_shape, scale):
@@ -198,33 +216,64 @@ class LaneLine:
         self._fit_undone = None
 
     def get_coefficients(self):
+        """
+        Returns the coefficients for the interpolated parabola as a Numpy array, None if not yet interpolated.
+        """
         return tuple(self._coefficients)
 
     def get_centroid(self, band):
+        """
+        Returns the sliding window for the given band; None if it hasn't yet been determined.
+        """
         return self._centroids[band]
 
     def get_centroids(self):
+        """
+        Returns a copy of the list of all centroids, as a Numpy array 
+        """
         return copy.deepcopy(self._centroids)
 
     def get_bottom_x(self):
+        """
+        Returns the identified starting x coordinate for the lane line at the bottom of the image, or None if not yet
+        identified
+        """
         return self._bottom_x
 
     def get_recenter_roi(self, _):
+        """
+        Implement to return the region of interest, in a given image, where to determine the starting x coordinate of
+        the lane line at the bottom of the image.
+        """
         raise NotImplementedError
 
     def get_printable_name(self):
         raise NotImplementedError
 
     def is_unreliable(self):
+        """
+        Returns True iff the lane line has been detected unreliably.
+        """
         return self._is_unreliable
 
     def mark_unreliable(self):
+        """
+        Marks the lane line as unrelilable.
+        """
         self._is_unreliable = True
 
     def get_curvature(self):
+        """
+        Returns the curvature radius in meters, it is negative if the centre of curvature is to the left, positive
+        otherwise; returns None if such radius hasn't yet been computed.
+        """
         return self._curvature_radius
 
     def recenter(self, thresholded, filter):
+        """
+        Determines the likely starting x coordinate of the lane line at the bottom of the `trhesholded` image,
+        using the given filter for convolution; the result is stored in `self._bottom_x` and also returned.
+        """
         assert thresholded.shape == self._image_shape
         index, offset = self.get_recenter_roi(thresholded)
         area_sum = np.sum(thresholded[index], axis=0)
@@ -236,6 +285,9 @@ class LaneLine:
         return self._bottom_x
 
     def set_centroids(self, centroids):
+        """
+        Sets the sliding windows for the lane line. The method takes a copy of the given list-like parameter. 
+        """
         self._centroids = copy.deepcopy(centroids)
 
     def check_reliability(self):
@@ -327,7 +379,7 @@ class LaneLine:
             """
             estimator = linear_model.RANSACRegressor(base_estimator=linear_model.LinearRegression(), min_samples=2,
                                                      random_state=2111970)
-            # The Scikit pipeline is not strictly necessary for least means-square linear interpolation, but it makes it
+            # The Scikit pipeline is not strictly necessary for least means-square interpolation, but it makes it
             # easier to replace the estimator used, and change the degree of the polynomial approximation
             model = make_pipeline(PolynomialFeatures(2), estimator)
             model.fit(x.reshape(-1, 1), Y)
@@ -426,6 +478,9 @@ def get_lane_lines_position_at(lane_line1, lane_line2, y):
 
 
 def turn_grayscale_into_color(image):
+    """
+    Returns the given grayscale image (single channel) as a color image with 3 channels, that still looks the same. 
+    """
     assert len(image.shape) == 2
     color_image = cv2.merge((image, image, image))
     return color_image
@@ -440,17 +495,17 @@ class ImageProcessing:
         self._M = None
         self.invalidate()
         # Computation parameters, tune with care
-        # measurement unit conversion rate for the top view in the x direction, in meters per pixel
+        # Measurement unit conversion rate for the top view in the x direction, in meters per pixel
         self._mx = 3.66 / 748
-        # measurement unit conversion rate for the top view in the y direction, in meters per pixel
+        # Measurement unit conversion rate for the top view in the y direction, in meters per pixel
         self._my = 3.48 / 93
-        # Parameters coverning the size of the sliding window to find lane lines, and how much it slides either way
+        # The size of the sliding window to find lane lines, and how much it slides either way
         self._sliding_window_width = 100
         self._sliding_window_height = 80
         self._sliding_window_margin = 100
         # Filter used for convolution to find the lane line within a sliding window
         self._filter = gaussian(self._sliding_window_width, std=self._sliding_window_width / 8, sym=True)
-        # Font used for image overlay
+        # Font used for writings overlay
         self._font = cv2.FONT_HERSHEY_SIMPLEX
 
     def invalidate(self):
@@ -462,6 +517,10 @@ class ImageProcessing:
         self._lanes_points = None
 
     def get_top_view(self):
+        """
+        Given the image in `self._unprocessed`, transforms its perspective from the camera to a bird-eye view,
+        stores the result in `self._top_view` and returns it.
+        """
         assert self._unprocessed is not None
         image = self._unprocessed
         if self._top_view is None:
@@ -512,6 +571,10 @@ class ImageProcessing:
         return self._top_view
 
     def get_thresholded(self):
+        """
+        Starting from the image in `self._top_view`, thresholds it, stores the result is `self._thresholded` and
+        returns it. The result is a single-channel, black-and-white image.
+        """
         if self._thresholded is None:
             assert self._top_view is not None
             masks = (((0, 100, 100), (50, 255, 255)),
@@ -606,6 +669,10 @@ class ImageProcessing:
             lane_line.set_centroids(centroids)
 
     def fit_lane_lines(self):
+        """
+        Direct the left and right lane line objects to interpolate the thresholded image; then evaluate the reliability
+        of the result.
+        """
         # Interpolate the points believed to belong to either lane lilne
         for lane_line in self._lane_lines:
             lane_line.fit(self._thresholded)
@@ -633,7 +700,11 @@ class ImageProcessing:
                 self._prev_lane_lines[i_lane] = copy.deepcopy(lane_line)
 
     def overlay_windows(self, image):
-        # Draw the sliding windows
+        """
+        Draws the sliding windows over the given image, along with the corresponding measure of goodness; each window
+         (a rectangle) is red if its measure of goodness is below threshold, green otherwise. Returns the resulting
+         image.
+          """
         image_with_overlay = None
         for lane_line in self._lane_lines:
             centroids = lane_line.get_centroids()
@@ -659,6 +730,10 @@ class ImageProcessing:
         return image_with_overlay if image_with_overlay is not None else image
 
     def get_lanes_points(self, v_res):
+        """
+        Returns the coordinates of image points belonging to the interpolated lane lines, for y ranging between 0 and
+         v_res-1 at interval of 1.
+        """
         fit_x = [None, None]
         if self._lanes_points is None:
             if self._plot_y is None:
@@ -672,12 +747,15 @@ class ImageProcessing:
         return self._plot_y, fit_x
 
     def overlay_lane_lines(self, image):
+        """
+        Draws the interpolated lane lines over the given image and returns the result.
+        """
         assert self._lane_lines is not None
 
         image_with_lane_lines = image
         plot_y, lanes_points = self.get_lanes_points(image.shape[0])
         for lane_points, lane_line in zip(lanes_points, self._lane_lines):
-            # Get the formato for fit_x and self._plot_y that cv2.polylines demands
+            # Get the format for fit_x and self._plot_y that cv2.polylines demands
             fit_points = np.array((lane_points, plot_y), np.int32).T.reshape((-1, 1, 2))
             color = (0, 0, 255) if lane_line.is_unreliable() else (255, 0, 255)
             image_with_lane_lines = cv2.polylines(image_with_lane_lines,
@@ -725,32 +803,40 @@ class ImageProcessing:
         return result
 
     def overlay_thresholded(self, image):
+        """
+        Draws the result of thresholding (a black-and-white image from bird-eye view) over the given image, and returns
+        the result.
+        """
         thresholded_color = turn_grayscale_into_color(self._thresholded)
         with_thresholded = cv2.addWeighted(image, 1, thresholded_color, 0.5, 0)
         return with_thresholded
 
     def overlay_additional_info(self, image, frame_n):
+        """
+        Returns the given image with, in overlay, required information: prorgessive frame number `frame_n`,
+          curvature radius, lane width and car distance from the center of the lane (in meters). If the centre of
+          curvature is to the left of the lane, then the curvature radius is shown negative. If the camera is to the
+          left of the lane center, then its position is shown negative.
+        """
 
-        '''radiuses = []
-        for lane_line in self._lane_lines:
-            radius = lane_line.get_curvature()
-            radiuses.append(radius)'''
         radius = (self._lane_lines[0].get_curvature() + self._lane_lines[1].get_curvature()) / 2
         x1, x2 = get_lane_lines_position_at(self._lane_lines[0], self._lane_lines[1], image.shape[0] - 1)
         lane_width = abs(x1 - x2) * self._mx
         position = ((x1 + x2) / 2 - image.shape[1] // 2) * self._mx
-        ratio = abs(self._lane_lines[0].get_curvature())/abs(self._lane_lines[1].get_curvature())
-        # top_lane_width = get_lane_width(self._lane_lines[0], self._lane_lines[1], image.shape[0] // 2) * self._mx
-        to_print = '#{:d} {:2.3} Curvature radius={:+5.0f}m, Lane width={:2.2f}m, Position={:+1.2f}m'.format(frame_n,
-                                                                                                     ratio,
-                                                                                                     radius,
-                                                                                                     lane_width,
-                                                                                                     position)
+        to_print = '#{:d} Curvature radius={:+5.0f}m, Lane width={:2.2f}m, Position={:+1.2f}m'.format(frame_n,
+                                                                                                      radius,
+                                                                                                      lane_width,
+                                                                                                      position)
         text_color = (0, 0, 128)
         cv2.putText(image, to_print, (0, 50), self._font, 1, text_color, 2, cv2.LINE_AA)
         return image
 
     def process_frame(self, frame, frame_n):
+        """
+        Process the given frame, with progressive number `frame_n`. Detects the lane lines in it and returns the frame
+         with the lane highlighted and with information on curvature radius, lane width and car distance from the lane
+         center. 
+        """
         self._unprocessed = frame
         self.invalidate()
         self.get_top_view()
@@ -762,12 +848,13 @@ class ImageProcessing:
         self.position_windows()
         self.fit_lane_lines()
         frame_with_lane = self.overlay_lanes_in_perspective(frame)
-        with_thresholded = self.overlay_thresholded(frame_with_lane)
-        with_windows = self.overlay_windows(with_thresholded)
-        with_lane_line = self.overlay_lane_lines(with_windows)
-        if frame_n == snap:
-            save_frame(with_lane_line, 'output_images/interpolated.png', 'Interpolated lanes')
-        with_text = self.overlay_additional_info(with_lane_line, frame_n)
+        # Uncomment below for debugging
+        # with_thresholded = self.overlay_thresholded(frame_with_lane)
+        # with_windows = self.overlay_windows(with_thresholded)
+        # with_lane_line = self.overlay_lane_lines(with_windows)
+        # if frame_n == snap:
+        #    save_frame(with_lane_line, 'output_images/interpolated.png', 'Interpolated lanes')
+        with_text = self.overlay_additional_info(frame_with_lane, frame_n)
         if frame_n == snap:
             out = self.overlay_lanes_in_perspective(frame)
             out = self.overlay_additional_info(out, frame_n)
@@ -820,15 +907,15 @@ def save_frame(frame, f_name, title=None):
 
     if len(frame.shape) == 2:
         frame = turn_grayscale_into_color(frame)
-    else:
-        assert len(frame.shape) == 3
-        frame = switch_RGB(frame)
 
-    image_PIL = PIL.Image.fromarray(frame)
-    image_PIL.save(f_name)  # TODO change to OpenCV imwrite
+    cv2.imwrite(f_name, frame_counter)
 
 
 def parse_args():
+    """
+    Parses the program command-line arguments.
+    """
+
     # Description of this program.
     desc = "Advanced Lane Detection -Project for Udacity's Self-Driving Cars Nanodegree Program."
 
@@ -848,22 +935,10 @@ def parse_args():
     return input_fname
 
 
-def save_undistorted_frame(f_name, mtx, dist, roi):
-    img = cv2.imread(f_name)
-    assert img is not None
-    undistorted_img = undistort_image(img, mtx, dist, roi)
-
-    # Switch from BGR to RGB for presentation in Matplotlib
-    undistorted_img= switch_RGB(undistorted_img)
-
-    # Saves the undistorted image
-    f_basename = os.path.basename(f_name)
-    output_f_name = os.path.splitext(f_basename)[0] + '_undist.png'
-
-    save_frame(undistorted_img, output_f_name )
-
-
 if __name__ == '__main__':
+    # Suppress np.polyfit() warning `RankWarning`
+    warnings.simplefilter('ignore', np.RankWarning)
+
     input_fname = parse_args()
     output_fname = 'out_' + input_fname
 
@@ -882,26 +957,30 @@ if __name__ == '__main__':
     # Calibrate the camera
     mtx, dist, rvecs, tvecs, roi = calibrate_camera(calibration_dir, target_size)
 
-    # Save an image with one calibration sample along with its undistorted version
+    # Uncomment to save an image with one calibration sample along with its undistorted version
     # save_undistorted_sample(calibration_dir + '/calibration2.jpg', mtx, dist, roi)
 
+    # Open the input video stream and determine frame rate and resolution
     vidcap = cv2.VideoCapture(input_fname)
     fps = vidcap.get(cv2.CAP_PROP_FPS)
     assert fps > 0
     vertical_resolution = vidcap.get(cv2.CAP_PROP_FRAME_HEIGHT)
     horizontal_resolution = vidcap.get(cv2.CAP_PROP_FRAME_WIDTH)
+
+    # Open the output video stream
     fourcc = cv2.VideoWriter_fourcc(*'XVID')
     vidwrite = cv2.VideoWriter(output_fname, fourcc=fourcc, fps=fps,
                                frameSize=(int(horizontal_resolution), int(vertical_resolution)))
-    print('Source video', input_fname, 'is at', fps, 'fps with resolution of', int(horizontal_resolution), 'by',
-          int(vertical_resolution),
-          'pixels')
 
+    print('Source video {} is at {:.2f} fps with resolution of {}x{} pixels'.format(input_fname,
+                                                                                    fps,
+                                                                                    int(horizontal_resolution),
+                                                                                    int(vertical_resolution)))
     frame_counter = 0
-    # vidcap.set(cv2.CAP_PROP_POS_MSEC, 6000)
     start_time = time.time()
     processor = ImageProcessing()
 
+    # Main loop, process one frame at a time from the input video stream and send the result to the output stream
     while (True):
         read, frame = vidcap.read()
         if not read:
@@ -909,9 +988,9 @@ if __name__ == '__main__':
         frame_counter += 1
         if frame_counter == snap:
             save_frame(frame, 'output_images/original.png', 'Original image')
-        #print('Processing frame', frame_counter)
         sys.stdout.write("\rProcessing frame: {0:>6}".format(frame_counter))
         sys.stdout.flush()
+
         # Un-distort the frame applying camera calibration
         undistorted_img = undistort_image(frame, mtx, dist)
         if frame_counter == snap:
@@ -919,12 +998,8 @@ if __name__ == '__main__':
 
         # Process the frame and find the lane lines
         processed = processor.process_frame(undistorted_img, frame_counter)
+
         # Write the result to the output video stream
         vidwrite.write(processed)
-        if frame_counter % 100 == 0:
-            pass
 
     print('\nProcessing rate {:.1f} fps'.format(frame_counter / (time.time() - start_time)))
-
-
-# TODO check frames 72 -118 advanced video
